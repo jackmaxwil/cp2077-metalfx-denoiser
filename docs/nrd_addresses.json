@@ -1,0 +1,18 @@
+{
+  "version": "2.21",
+  "addresses": {
+    "REBLUR_Diffuse_Temporal": 16098312,
+    "REBLUR_DiffuseSpecular_Temporal": 16166816,
+    "REBLUR_Diffuse_Blur": 16098312,
+    "REBLUR_Diffuse_PostBlur": 16098312,
+    "REBLUR_DiffuseSpecular_Blur": 16166816,
+    "NrdInputs": 16709732,
+    "RTXDI_Denoising_Enable": 23827832,
+    "FilterOutput": 16703044,
+    "FilterLocalShadow": 16703044,
+    "SIGMA_Shadow_Blur": 16224284,
+    "NrdAllocate": 16415612,
+    "NrdReallocate": 16415692,
+    "NrdFree": 16415808
+  }
+}
