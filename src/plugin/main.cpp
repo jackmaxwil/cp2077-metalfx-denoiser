@@ -10,7 +10,12 @@
 #include <iostream>
 
 #include "NRDHooks.hpp"
+#include "Config.hpp"
 #include "../framework/MetalBridge.h"
+
+// Forward declaration for Frida integration
+extern void FridaIntegration_Init(MetalFXContext* ctx);
+extern void FridaIntegration_Shutdown();
 
 // Global context
 static MetalFXContext* g_metalFXContext = nullptr;
@@ -29,9 +34,28 @@ bool Initialize() {
     
     std::cerr << "[MetalFXDenoiser] Initializing MetalFX Denoiser v1.0.0" << std::endl;
     
+    // Load configuration
+    Config::Load();
+    const auto& config = Config::Get();
+    
+    std::cerr << "[MetalFXDenoiser] Config loaded:" << std::endl;
+    std::cerr << "  Enabled: " << (config.enabled ? "yes" : "no") << std::endl;
+    std::cerr << "  Shadows: " << (config.features.shadows ? "yes" : "no") << std::endl;
+    std::cerr << "  RTXDI Diffuse: " << (config.features.rtxdiDiffuse ? "yes" : "no") << std::endl;
+    std::cerr << "  RTXDI Specular: " << (config.features.rtxdiSpecular ? "yes" : "no") << std::endl;
+    std::cerr << "  GI: " << (config.features.globalIllumination ? "yes" : "no") << std::endl;
+    std::cerr << "  Reflections: " << (config.features.reflections ? "yes" : "no") << std::endl;
+    std::cerr << "  AO: " << (config.features.ambientOcclusion ? "yes" : "no") << std::endl;
+    
+    if (!config.enabled) {
+        std::cerr << "[MetalFXDenoiser] Plugin disabled in config" << std::endl;
+        return true;  // Return true to keep loaded but inactive
+    }
+    
     // Check MetalFX support
     if (!MetalFX_IsSupported()) {
         std::cerr << "[MetalFXDenoiser] ERROR: MetalFX not supported on this system" << std::endl;
+        std::cerr << "[MetalFXDenoiser] Requires macOS 13+ on Apple Silicon" << std::endl;
         return false;
     }
     
@@ -44,18 +68,22 @@ bool Initialize() {
     
     std::cerr << "[MetalFXDenoiser] MetalFX context created successfully" << std::endl;
     
+    // Initialize Frida integration (for external hook calls)
+    FridaIntegration_Init(g_metalFXContext);
+    std::cerr << "[MetalFXDenoiser] Frida integration initialized" << std::endl;
+    
     // Attach NRD hooks
     if (!NRDHooks::Initialize(g_metalFXContext)) {
-        std::cerr << "[MetalFXDenoiser] ERROR: Failed to attach NRD hooks" << std::endl;
-        MetalFX_DestroyContext(g_metalFXContext);
-        g_metalFXContext = nullptr;
-        return false;
+        std::cerr << "[MetalFXDenoiser] WARNING: Failed to attach NRD hooks" << std::endl;
+        std::cerr << "[MetalFXDenoiser] Use Frida script for hook injection instead" << std::endl;
+        // Don't fail - Frida hooks will handle this
+    } else {
+        std::cerr << "[MetalFXDenoiser] NRD hooks attached successfully" << std::endl;
     }
-    
-    std::cerr << "[MetalFXDenoiser] NRD hooks attached successfully" << std::endl;
     
     g_initialized = true;
     std::cerr << "[MetalFXDenoiser] Initialization complete" << std::endl;
+    std::cerr << "[MetalFXDenoiser] To enable hooks, run: frida -l metalfx_hooks.js -p <pid>" << std::endl;
     
     return true;
 }
@@ -72,6 +100,9 @@ void Shutdown() {
     
     // Detach hooks first
     NRDHooks::Shutdown();
+    
+    // Shutdown Frida integration
+    FridaIntegration_Shutdown();
     
     // Destroy MetalFX context
     if (g_metalFXContext) {

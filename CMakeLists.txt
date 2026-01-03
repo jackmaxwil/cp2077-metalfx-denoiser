@@ -53,6 +53,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/NRDHooks.cpp
     src/plugin/BufferInterceptor.cpp
     src/plugin/Config.cpp
+    src/plugin/FridaIntegration.cpp
 )
 
 target_include_directories(MetalFXDenoiser PRIVATE
