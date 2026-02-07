@@ -44,6 +44,7 @@ target_include_directories(MetalFXDenoiserCore PUBLIC
 
 set_target_properties(MetalFXDenoiserCore PROPERTIES
     OUTPUT_NAME "MetalFXDenoiserCore"
+    PREFIX ""
     SUFFIX ".dylib"
 )
 
@@ -73,12 +74,20 @@ target_link_libraries(MetalFXDenoiser PRIVATE
 
 set_target_properties(MetalFXDenoiser PROPERTIES
     OUTPUT_NAME "MetalFXDenoiser"
+    PREFIX ""
     SUFFIX ".dylib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "@loader_path;@loader_path/bin"
 )
 
 # Install target
-install(TARGETS MetalFXDenoiser MetalFXDenoiserCore
+install(TARGETS MetalFXDenoiser
     LIBRARY DESTINATION red4ext/plugins/MetalFXDenoiser
+)
+
+# Keep the core dylib out of the plugin root to avoid RED4ext trying to load it as a plugin.
+install(TARGETS MetalFXDenoiserCore
+    LIBRARY DESTINATION red4ext/plugins/MetalFXDenoiser/bin
 )
 
 # Copy config template

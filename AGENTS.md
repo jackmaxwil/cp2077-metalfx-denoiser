@@ -4,6 +4,10 @@
 
 This mod replaces NVIDIA NRD (Real-time Denoisers) with Apple's MetalFX Temporal Scaler for Cyberpunk 2077 on macOS. It provides hardware-accelerated denoising for ray tracing features.
 
+## Current Status (Canonical)
+
+See `docs/STATUS.md` and `docs/DEVELOPMENT.md` for the up-to-date project status and next steps.
+
 ## Architecture
 
 The mod consists of two shared libraries:

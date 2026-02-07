@@ -5,7 +5,7 @@
  * @brief NRD function hook declarations
  */
 
-#include "../framework/MetalBridge.h"
+#include "MetalBridge.h"
 
 namespace NRDHooks {
 

@@ -64,6 +64,12 @@ const Settings& Get();
 bool Load(const std::string& path);
 
 /**
+ * Load settings from default config locations
+ * @return true if loaded successfully
+ */
+bool Load();
+
+/**
  * Save current settings to file
  * @param path Path to config.toml
  * @return true if saved successfully

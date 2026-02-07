@@ -40,6 +40,19 @@ NS_ASSUME_NONNULL_BEGIN
                            outputHeight:(NSUInteger)outputHeight;
 
 /**
+ * Initialize with device, resolution, and explicit pixel formats.
+ */
+- (nullable instancetype)initWithDevice:(id<MTLDevice>)device
+                             inputWidth:(NSUInteger)inputWidth
+                            inputHeight:(NSUInteger)inputHeight
+                            outputWidth:(NSUInteger)outputWidth
+                           outputHeight:(NSUInteger)outputHeight
+                       colorPixelFormat:(MTLPixelFormat)colorPixelFormat
+                      motionPixelFormat:(MTLPixelFormat)motionPixelFormat
+                       depthPixelFormat:(MTLPixelFormat)depthPixelFormat
+                      outputPixelFormat:(MTLPixelFormat)outputPixelFormat;
+
+/**
  * Initialize for denoising only (same input/output resolution)
  */
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
@@ -75,6 +88,11 @@ NS_ASSUME_NONNULL_BEGIN
  * Reset temporal history (call after camera cut)
  */
 - (void)resetHistory;
+
+/**
+ * Set sharpness if supported by the underlying scaler.
+ */
+- (void)setSharpness:(float)sharpness;
 
 @end
 

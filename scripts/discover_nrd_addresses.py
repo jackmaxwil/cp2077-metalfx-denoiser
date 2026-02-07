@@ -61,9 +61,30 @@ def find_code_references(data: bytes, target_offset: int, max_search: int = 0x60
     return refs
 
 
-def find_function_start(data: bytes, ref_addr: int, max_search: int = 0x2000) -> int | None:
+def find_function_start(data: bytes, ref_addr: int, max_search: int = 0x8000) -> int | None:
     """Find function start by scanning backwards for prologue."""
     ref_offset = ref_addr - IMAGE_BASE
+
+    def is_pacibsp(instr: int) -> bool:
+        return instr == 0xD503237F
+
+    def is_stp_preindex_sp(instr: int) -> bool:
+        # Match STP (64-bit) with base register SP and negative signed imm7.
+        # Example prologue: stp x29, x30, [sp, #-0x10]!
+        if (instr & 0xFFC00000) != 0xA9800000:
+            return False
+        rn = (instr >> 5) & 0x1F
+        if rn != 31:
+            return False
+        imm7 = (instr >> 15) & 0x7F
+        # sign-extend imm7 and require it to be negative
+        if imm7 & 0x40:
+            imm7 -= 0x80
+        return imm7 < 0
+
+    def is_sub_sp_sp_imm(instr: int) -> bool:
+        # sub sp, sp, #imm12
+        return (instr & 0x7F8003FF) == 0x510003FF
     
     for back in range(0, max_search, 4):
         check_off = ref_offset - back
@@ -71,17 +92,20 @@ def find_function_start(data: bytes, ref_addr: int, max_search: int = 0x2000) ->
             break
         
         instr = struct.unpack('<I', data[check_off:check_off+4])[0]
-        
-        # STP X29, X30, [SP, #-X]! (standard prologue)
-        if instr & 0xFFC07FFF == 0xA9807BFD:
-            return IMAGE_BASE + check_off
-        
-        # PACIBSP (pointer auth)
-        if instr == 0xD503237F:
-            # Check next instruction for STP
+
+        # PACIBSP + prologue
+        if is_pacibsp(instr):
             next_instr = struct.unpack('<I', data[check_off+4:check_off+8])[0]
-            if next_instr & 0xFFC07FFF == 0xA9807BFD:
+            if is_stp_preindex_sp(next_instr) or is_sub_sp_sp_imm(next_instr):
                 return IMAGE_BASE + check_off
+
+        # Common prologues
+        if is_stp_preindex_sp(instr):
+            return IMAGE_BASE + check_off
+
+        if is_sub_sp_sp_imm(instr):
+            # Some functions start with `sub sp, sp, #imm` then register spills.
+            return IMAGE_BASE + check_off
             
     return None
 
@@ -101,7 +125,11 @@ def main():
     targets = {
         # REBLUR denoiser passes
         "REBLUR_Diffuse_Temporal": "REBLUR_Diffuse - Temporal accumulation",
+        "REBLUR_DiffuseSh_Temporal": "REBLUR_DiffuseSh - Temporal accumulation",
+        "REBLUR_DiffuseOcclusion_Temporal": "REBLUR_DiffuseOcclusion - Temporal accumulation",
+        "REBLUR_DiffuseDirectionalOcclusion_Temporal": "REBLUR_DiffuseDirectionalOcclusion - Temporal accumulation",
         "REBLUR_DiffuseSpecular_Temporal": "REBLUR_DiffuseSpecular - Temporal accumulation",
+        "REBLUR_DiffuseSpecularOcclusion_Temporal": "REBLUR_DiffuseSpecularOcclusion - Temporal accumulation",
         "REBLUR_Diffuse_Blur": "REBLUR_Diffuse - Blur",
         "REBLUR_Diffuse_PostBlur": "REBLUR_Diffuse - Post-blur",
         "REBLUR_Diffuse_HistoryFix": "REBLUR_Diffuse - History fix",
@@ -109,6 +137,10 @@ def main():
         
         # NRD configuration
         "NrdInputs": "NrdInputs",
+
+        # Feature gating / cvars
+        "cvRayTracingEnableNRD": "cvRayTracingEnableNRD",
+        "EnableNRD": "EnableNRD",
         
         # RTXDI denoising
         "RTXDI_Denoising_Enable": "EnableRTXDIDenoising",
@@ -120,6 +152,14 @@ def main():
         
         # Shadow filtering
         "SIGMA_Shadow": "SIGMA_Shadow",
+        "SIGMA_Shadow_TemporalStabilization": "SIGMA_Shadow - Temporal stabilization",
+        "SIGMA_ShadowTranslucency": "SIGMA_ShadowTranslucency",
+        "SIGMA_ShadowTranslucency_TemporalStabilization": "SIGMA_ShadowTranslucency - Temporal stabilization",
+
+        # RELAX denoiser passes (often used for path tracing / indirect)
+        "RELAX_Diffuse_Temporal": "RELAX_Diffuse - Temporal accumulation",
+        "RELAX_Specular_Temporal": "RELAX_Specular - Temporal accumulation",
+        "RELAX_DiffuseSpecular_Temporal": "RELAX_DiffuseSpecular - Temporal accumulation",
     }
     
     discovered = {}

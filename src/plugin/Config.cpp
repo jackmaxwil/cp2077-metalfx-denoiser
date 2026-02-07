@@ -58,6 +58,16 @@ const Settings& Get() {
     return s_settings;
 }
 
+bool Load() {
+    if (Load(std::string("red4ext/plugins/MetalFXDenoiser/config.toml"))) {
+        return true;
+    }
+    if (Load(std::string("config/config.toml"))) {
+        return true;
+    }
+    return false;
+}
+
 bool Load(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {

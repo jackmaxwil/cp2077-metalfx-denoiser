@@ -81,6 +81,7 @@ MTLPixelFormat GetMetalFXCompatibleFormat(MTLPixelFormat inputFormat) {
                       output:(id<MTLTexture>)output
                        width:(float)width
                       height:(float)height
+                       flipY:(BOOL)flipY
                commandBuffer:(id<MTLCommandBuffer>)commandBuffer;
 
 @end
@@ -105,8 +106,9 @@ MTLPixelFormat GetMetalFXCompatibleFormat(MTLPixelFormat inputFormat) {
             
             kernel void convertMotionVectors(
                 texture2d<float, access::read> input [[texture(0)]],
-                texture2d<float, access::write> output [[texture(1)]],
+                texture2d<half, access::write> output [[texture(1)]],
                 constant float2& resolution [[buffer(0)]],
+                constant uint& flags [[buffer(1)]],
                 uint2 gid [[thread_position_in_grid]])
             {
                 if (gid.x >= output.get_width() || gid.y >= output.get_height()) {
@@ -121,9 +123,11 @@ MTLPixelFormat GetMetalFXCompatibleFormat(MTLPixelFormat inputFormat) {
                 
                 // MetalFX expects Y to point down (screen space)
                 // Flip Y if game uses OpenGL convention
-                // pixelMotion.y = -pixelMotion.y;  // Uncomment if needed
+                if ((flags & 1u) != 0u) {
+                    pixelMotion.y = -pixelMotion.y;
+                }
                 
-                output.write(float4(pixelMotion, 0, 0), gid);
+                output.write(half4(half2(pixelMotion), half2(0.0h, 0.0h)), gid);
             }
         )";
         
@@ -158,6 +162,7 @@ MTLPixelFormat GetMetalFXCompatibleFormat(MTLPixelFormat inputFormat) {
                       output:(id<MTLTexture>)output
                        width:(float)width
                       height:(float)height
+                       flipY:(BOOL)flipY
                commandBuffer:(id<MTLCommandBuffer>)commandBuffer
 {
     id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
@@ -167,6 +172,9 @@ MTLPixelFormat GetMetalFXCompatibleFormat(MTLPixelFormat inputFormat) {
     
     float resolution[2] = {width, height};
     [encoder setBytes:resolution length:sizeof(resolution) atIndex:0];
+
+    uint32_t flags = flipY ? 1u : 0u;
+    [encoder setBytes:&flags length:sizeof(flags) atIndex:1];
     
     MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
     MTLSize threadGroups = MTLSizeMake(
@@ -226,6 +234,28 @@ void BufferConverter_ConvertMotionVectors(
                                       output:(__bridge id<MTLTexture>)output
                                        width:width
                                       height:height
+                                       flipY:NO
+                               commandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
+    }
+}
+
+void BufferConverter_ConvertMotionVectorsEx(
+    BufferConverterContext* ctx,
+    void* input,
+    void* output,
+    float width,
+    float height,
+    bool flipY,
+    void* commandBuffer)
+{
+    if (!ctx || !ctx->converter) return;
+
+    @autoreleasepool {
+        [ctx->converter convertMotionVectors:(__bridge id<MTLTexture>)input
+                                      output:(__bridge id<MTLTexture>)output
+                                       width:width
+                                      height:height
+                                       flipY:flipY
                                commandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
     }
 }

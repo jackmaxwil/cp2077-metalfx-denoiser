@@ -11,7 +11,8 @@
 
 #include "NRDHooks.hpp"
 #include "Config.hpp"
-#include "../framework/MetalBridge.h"
+#include "MetalBridge.h"
+#include "Support/macOS/AddressResolverOverride.hpp"
 
 // Forward declaration for Frida integration
 extern void FridaIntegration_Init(MetalFXContext* ctx);
@@ -24,6 +25,13 @@ static bool g_initialized = false;
 namespace MetalFXDenoiser {
 
 /**
+ * Logging helper for address validation
+ */
+static void ValidationLog(const char* msg) {
+    std::cerr << msg << std::endl;
+}
+
+/**
  * Initialize the MetalFX denoiser system
  */
 bool Initialize() {
@@ -33,6 +41,17 @@ bool Initialize() {
     }
     
     std::cerr << "[MetalFXDenoiser] Initializing MetalFX Denoiser v1.0.0" << std::endl;
+    std::cerr << "[MetalFXDenoiser] Target game version: " << NRD::Address::GAME_VERSION << std::endl;
+    
+    // Validate addresses before proceeding
+    std::cerr << "[MetalFXDenoiser] Validating NRD addresses..." << std::endl;
+    if (!NRD::Address::ValidateAddressesDetailed(ValidationLog)) {
+        std::cerr << "[MetalFXDenoiser] FATAL: Address validation failed" << std::endl;
+        std::cerr << "[MetalFXDenoiser] This mod version is incompatible with your game version" << std::endl;
+        std::cerr << "[MetalFXDenoiser] Please check for mod updates or run address discovery" << std::endl;
+        return false;  // Fail-fast: don't load if addresses are wrong
+    }
+    std::cerr << "[MetalFXDenoiser] Address validation passed" << std::endl;
     
     // Load configuration
     Config::Load();
@@ -43,9 +62,9 @@ bool Initialize() {
     std::cerr << "  Shadows: " << (config.features.shadows ? "yes" : "no") << std::endl;
     std::cerr << "  RTXDI Diffuse: " << (config.features.rtxdiDiffuse ? "yes" : "no") << std::endl;
     std::cerr << "  RTXDI Specular: " << (config.features.rtxdiSpecular ? "yes" : "no") << std::endl;
-    std::cerr << "  GI: " << (config.features.globalIllumination ? "yes" : "no") << std::endl;
+    std::cerr << "  GI: " << (config.features.restirGI ? "yes" : "no") << std::endl;
     std::cerr << "  Reflections: " << (config.features.reflections ? "yes" : "no") << std::endl;
-    std::cerr << "  AO: " << (config.features.ambientOcclusion ? "yes" : "no") << std::endl;
+    std::cerr << "  AO: " << (config.features.ao ? "yes" : "no") << std::endl;
     
     if (!config.enabled) {
         std::cerr << "[MetalFXDenoiser] Plugin disabled in config" << std::endl;
@@ -148,7 +167,9 @@ RED4EXT_C_EXPORT void RED4EXT_CALL Query(RED4ext::PluginInfo* aInfo) {
     aInfo->name = L"MetalFX Denoiser";
     aInfo->author = L"Cyberpunk 2077 macOS Modding Community";
     aInfo->version = RED4EXT_SEMVER(1, 0, 0);
-    aInfo->runtime = RED4EXT_RUNTIME_LATEST;
+    // On macOS, RED4ext's runtime versioning doesn't always line up with the game's reported product version.
+    // We only use the SDK headers, so we can mark this plugin as runtime-independent.
+    aInfo->runtime = RED4EXT_RUNTIME_INDEPENDENT;
     aInfo->sdk = RED4EXT_SDK_LATEST;
 }
 

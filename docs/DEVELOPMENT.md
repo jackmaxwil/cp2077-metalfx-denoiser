@@ -1,5 +1,7 @@
 # MetalFX Denoiser Development Guide
 
+For the canonical project status index, see `docs/STATUS.md`.
+
 ## Project Status
 
 The MetalFX Denoiser mod is in **early development**. Core infrastructure is complete, but runtime integration requires additional reverse engineering work.

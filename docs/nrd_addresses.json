@@ -1,18 +1,197 @@
 {
-  "version": "2.21",
-  "addresses": {
-    "REBLUR_Diffuse_Temporal": 16098312,
-    "REBLUR_DiffuseSpecular_Temporal": 16166816,
-    "REBLUR_Diffuse_Blur": 16098312,
-    "REBLUR_Diffuse_PostBlur": 16098312,
-    "REBLUR_DiffuseSpecular_Blur": 16166816,
-    "NrdInputs": 16709732,
-    "RTXDI_Denoising_Enable": 23827832,
-    "FilterOutput": 16703044,
-    "FilterLocalShadow": 16703044,
-    "SIGMA_Shadow_Blur": 16224284,
-    "NrdAllocate": 16415612,
-    "NrdReallocate": 16415692,
-    "NrdFree": 16415808
+  "REBLUR_Diffuse_Temporal": {
+    "string_offset": "0x6c5edff",
+    "code_refs": [
+      "0x100f5b77c"
+    ],
+    "function_addr": "0x100f5a408",
+    "function_offset": "0xf5a408"
+  },
+  "REBLUR_DiffuseSh_Temporal": {
+    "string_offset": "0x6c5f50b",
+    "code_refs": [
+      "0x100f60958"
+    ],
+    "function_addr": "0x100f5f184",
+    "function_offset": "0xf5f184"
+  },
+  "REBLUR_DiffuseOcclusion_Temporal": {
+    "string_offset": "0x6c5f226",
+    "code_refs": [
+      "0x100f5dc58"
+    ],
+    "function_addr": "0x100f5d0e8",
+    "function_offset": "0xf5d0e8"
+  },
+  "REBLUR_DiffuseSpecular_Temporal": {
+    "string_offset": "0x6c60555",
+    "code_refs": [
+      "0x100f6cb48"
+    ],
+    "function_addr": "0x100f6afa0",
+    "function_offset": "0xf6afa0"
+  },
+  "REBLUR_DiffuseSpecularOcclusion_Temporal": {
+    "string_offset": "0x6c60a3f",
+    "code_refs": [
+      "0x100f6f8ec"
+    ],
+    "function_addr": "0x100f6ea68",
+    "function_offset": "0xf6ea68"
+  },
+  "REBLUR_Diffuse_Blur": {
+    "string_offset": "0x6c5eed5",
+    "code_refs": [
+      "0x100f5bca8"
+    ],
+    "function_addr": "0x100f5a408",
+    "function_offset": "0xf5a408"
+  },
+  "REBLUR_Diffuse_PostBlur": {
+    "string_offset": "0x6c5ef1e",
+    "code_refs": [
+      "0x100f5bf64"
+    ],
+    "function_addr": "0x100f5a408",
+    "function_offset": "0xf5a408"
+  },
+  "REBLUR_Diffuse_HistoryFix": {
+    "string_offset": "0x6c5ee79",
+    "code_refs": [
+      "0x100f5b9e8"
+    ],
+    "function_addr": "0x100f5a408",
+    "function_offset": "0xf5a408"
+  },
+  "REBLUR_Diffuse_PrePass": {
+    "string_offset": "0x6c5edac",
+    "code_refs": [
+      "0x100f5b3ac"
+    ],
+    "function_addr": "0x100f5a408",
+    "function_offset": "0xf5a408"
+  },
+  "NrdInputs": {
+    "string_offset": "0x6c63dca",
+    "code_refs": [
+      "0x100ff02c0"
+    ],
+    "function_addr": "0x100fef864",
+    "function_offset": "0xfef864"
+  },
+  "cvRayTracingEnableNRD": {
+    "string_offset": "0x6c67bf0",
+    "code_refs": [
+      "0x1010ef450"
+    ],
+    "function_addr": "0x1010ebeac",
+    "function_offset": "0x10ebeac"
+  },
+  "EnableNRD": {
+    "string_offset": "0x6c67bfc",
+    "code_refs": [],
+    "function_offset": null
+  },
+  "RTXDI_Denoising_Enable": {
+    "string_offset": "0x6c8714c",
+    "code_refs": [
+      "0x1016bd2cc"
+    ],
+    "function_addr": "0x1016b9578",
+    "function_offset": "0x16b9578"
+  },
+  "RTXDI_DenoisingMask": {
+    "string_offset": "0x6c87707",
+    "code_refs": [
+      "0x1016bea20"
+    ],
+    "function_addr": "0x1016b9578",
+    "function_offset": "0x16b9578"
+  },
+  "CRenderNode_RayTracingFilterOutput": {
+    "string_offset": "0x6c645a8",
+    "code_refs": [
+      "0x100feeb14"
+    ],
+    "function_addr": "0x100feeaa8",
+    "function_offset": "0xfeeaa8"
+  },
+  "CRenderNode_FilterRayTracedLocalShadow": {
+    "string_offset": "0x6c64581",
+    "code_refs": [
+      "0x100feea5c"
+    ],
+    "function_addr": "0x100fee9f0",
+    "function_offset": "0xfee9f0"
+  },
+  "SIGMA_Shadow": {
+    "string_offset": "0x6c61670",
+    "code_refs": [
+      "0x100f7975c"
+    ],
+    "function_addr": "0x100f7901c",
+    "function_offset": "0xf7901c"
+  },
+  "SIGMA_Shadow_TemporalStabilization": {
+    "string_offset": "0x6c6173f",
+    "code_refs": [
+      "0x100f79e84"
+    ],
+    "function_addr": "0x100f7901c",
+    "function_offset": "0xf7901c"
+  },
+  "SIGMA_ShadowTranslucency": {
+    "string_offset": "0x6c617c3",
+    "code_refs": [
+      "0x100f7aab0"
+    ],
+    "function_addr": "0x100f7a358",
+    "function_offset": "0xf7a358"
+  },
+  "SIGMA_ShadowTranslucency_TemporalStabilization": {
+    "string_offset": "0x6c618ca",
+    "code_refs": [
+      "0x100f7b3b0"
+    ],
+    "function_addr": "0x100f7a358",
+    "function_offset": "0xf7a358"
+  },
+  "RELAX_Diffuse_Temporal": {
+    "string_offset": "0x6c61a2e",
+    "code_refs": [
+      "0x100f7d2f4"
+    ],
+    "function_addr": "0x100f7b970",
+    "function_offset": "0xf7b970"
+  },
+  "RELAX_Specular_Temporal": {
+    "string_offset": "0x6c61cb7",
+    "code_refs": [
+      "0x100f80cac"
+    ],
+    "function_addr": "0x100f7efe4",
+    "function_offset": "0xf7efe4"
+  },
+  "RELAX_DiffuseSpecular_Temporal": {
+    "string_offset": "0x6c61f5e",
+    "code_refs": [
+      "0x100f84f94"
+    ],
+    "function_addr": "0x100f82a44",
+    "function_offset": "0xf82a44"
+  },
+  "_symbols": {
+    "__ZN20RayTracingCustomData11NrdAllocateEPvmm": {
+      "addr": "0x100fa7b7c",
+      "offset": "0xfa7b7c"
+    },
+    "__ZN20RayTracingCustomData13NrdReallocateEPvS0_mm": {
+      "addr": "0x100fa7bcc",
+      "offset": "0xfa7bcc"
+    },
+    "__ZN20RayTracingCustomData7NrdFreeEPvS0_": {
+      "addr": "0x100fa7c40",
+      "offset": "0xfa7c40"
+    }
   }
 }

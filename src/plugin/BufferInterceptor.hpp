@@ -7,6 +7,8 @@
 
 #include <cstdint>
 
+#include "MetalBridge.h"
+
 /**
  * Information about an extracted buffer
  */
@@ -79,5 +81,21 @@ void SetCurrentResources(
     float jitterY,
     bool resetHistory
 );
+
+/**
+ * Set the current frame's textures for a specific denoising feature.
+ * This is intended to be called from Frida hooks where the true MTLTexture pointers are known.
+ */
+void SetCurrentFeatureTextures(MetalFXFeature feature, void* colorTexture, void* outputTexture);
+
+/**
+ * Get the last provided color texture for a feature.
+ */
+BufferInfo GetCurrentFeatureColor(MetalFXFeature feature);
+
+/**
+ * Get the last provided output texture for a feature.
+ */
+BufferInfo GetCurrentFeatureOutput(MetalFXFeature feature);
 
 } // namespace BufferInterceptor

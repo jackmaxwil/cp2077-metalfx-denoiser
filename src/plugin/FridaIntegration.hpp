@@ -8,7 +8,7 @@
  * to perform actual MetalFX denoising operations.
  */
 
-#include "../framework/MetalBridge.h"
+#include "MetalBridge.h"
 #include <cstdint>
 
 extern "C" {
@@ -65,5 +65,38 @@ void MetalFX_GetPerformanceMetrics(
     uint64_t* framesProcessed,
     uint64_t* framesFallback
 );
+
+/**
+ * Provide current frame resources from Frida (preferred over guessing wrappers).
+ */
+void MetalFX_SetCurrentResources(
+    void* motionVectors,
+    void* depthBuffer,
+    void* commandBuffer,
+    float jitterX,
+    float jitterY,
+    bool resetHistory
+);
+
+/**
+ * Provide the current feature's color/output textures from Frida.
+ */
+void MetalFX_SetCurrentFeatureTextures(int feature, void* colorTexture, void* outputTexture);
+
+/**
+ * Retrieve a snapshot of the most recent NrdInputs config bytes.
+ * @return number of bytes copied into outBuffer
+ */
+uint32_t MetalFX_GetLastNrdInputsSnapshot(void* outBuffer, uint32_t capacity);
+
+/**
+ * Clear the stored NrdInputs snapshot.
+ */
+void MetalFX_ClearLastNrdInputsSnapshot(void);
+
+/**
+ * Configure motion vector conversion mode.
+ */
+void MetalFX_PluginSetMotionVectorMode(int mode, bool flipY);
 
 }

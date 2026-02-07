@@ -10,6 +10,9 @@
 #include <iostream>
 #include <mutex>
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
 namespace BufferInterceptor {
 
 // =============================================================================
@@ -27,33 +30,42 @@ static float s_jitterX = 0.0f;
 static float s_jitterY = 0.0f;
 static bool s_resetHistory = false;
 
+static void* s_featureColor[MetalFXFeature_Count] = {};
+static void* s_featureOutput[MetalFXFeature_Count] = {};
+
 // =============================================================================
-// Game Buffer Structure (needs reverse engineering)
+// Safe memory probing helpers (avoid EXC_BAD_ACCESS on bad game pointers)
 // =============================================================================
 
-/**
- * Hypothetical game buffer structure
- * Actual layout needs to be discovered via RE
- */
-struct GameRenderBuffer {
-    void* vtable;           // 0x00
-    void* unknown1;         // 0x08
-    void* metalTexture;     // 0x10 - Likely MTLTexture
-    uint32_t width;         // 0x18
-    uint32_t height;        // 0x1C
-    uint32_t format;        // 0x20
-    // ... more fields
-};
+static bool SafeRead(uintptr_t addr, void* out, size_t size) {
+    mach_vm_size_t outSize = 0;
+    kern_return_t kr = mach_vm_read_overwrite(
+        mach_task_self(),
+        static_cast<mach_vm_address_t>(addr),
+        static_cast<mach_vm_size_t>(size),
+        reinterpret_cast<mach_vm_address_t>(out),
+        &outSize);
+    return kr == KERN_SUCCESS && outSize == size;
+}
 
-// Alternative structure if buffers are more complex
-struct GameTextureResource {
-    void* vtable;           // 0x00
-    char padding[0x28];     // Unknown fields
-    void* metalTexture;     // 0x30
-    uint32_t width;         // 0x38
-    uint32_t height;        // 0x3C
-    // ... more fields
-};
+template <typename T>
+static bool SafeReadValue(uintptr_t addr, T& out) {
+    return SafeRead(addr, &out, sizeof(T));
+}
+
+static bool IsReadablePointer(const void* p) {
+    if (!p) return false;
+    uintptr_t tmp = 0;
+    return SafeReadValue(reinterpret_cast<uintptr_t>(p), tmp);
+}
+
+static bool IsPlausibleObjCObject(const void* p) {
+    if (!IsReadablePointer(p)) return false;
+    uintptr_t isa = 0;
+    if (!SafeReadValue(reinterpret_cast<uintptr_t>(p), isa)) return false;
+    if (isa == 0) return false;
+    return IsReadablePointer(reinterpret_cast<const void*>(isa));
+}
 
 // =============================================================================
 // Implementation
@@ -86,6 +98,10 @@ void Shutdown() {
     s_motionVectors = nullptr;
     s_depthBuffer = nullptr;
     s_commandBuffer = nullptr;
+    for (int i = 0; i < MetalFXFeature_Count; i++) {
+        s_featureColor[i] = nullptr;
+        s_featureOutput[i] = nullptr;
+    }
     s_initialized = false;
     
     std::cerr << "[BufferInterceptor] Shutdown" << std::endl;
@@ -97,38 +113,33 @@ BufferInfo ExtractBuffer(void* gameBuffer) {
     if (!gameBuffer) {
         return info;
     }
-    
-    // Try to extract texture from game buffer structure
-    // This is speculative and needs validation via RE
-    
-    try {
-        // Attempt 1: Direct texture pointer at offset 0x10
-        GameRenderBuffer* buf = static_cast<GameRenderBuffer*>(gameBuffer);
-        if (buf->metalTexture) {
-            info.texture = buf->metalTexture;
-            info.width = buf->width;
-            info.height = buf->height;
-            info.format = buf->format;
-            return info;
-        }
-        
-        // Attempt 2: Texture at different offset
-        GameTextureResource* res = static_cast<GameTextureResource*>(gameBuffer);
-        if (res->metalTexture) {
-            info.texture = res->metalTexture;
-            info.width = res->width;
-            info.height = res->height;
-            return info;
-        }
-        
-    } catch (...) {
-        std::cerr << "[BufferInterceptor] Exception extracting buffer" << std::endl;
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(gameBuffer);
+
+    // Attempt 1: texture pointer at +0x10 (common wrapper pattern)
+    void* tex = nullptr;
+    if (SafeReadValue(base + 0x10, tex) && tex && IsPlausibleObjCObject(tex)) {
+        info.texture = tex;
+        SafeReadValue(base + 0x18, info.width);
+        SafeReadValue(base + 0x1C, info.height);
+        SafeReadValue(base + 0x20, info.format);
+        return info;
     }
-    
-    // Fallback: assume gameBuffer IS the texture directly
-    // This works if the game passes MTLTexture pointers
-    info.texture = gameBuffer;
-    
+
+    // Attempt 2: texture pointer at +0x30 (alternate wrapper pattern)
+    tex = nullptr;
+    if (SafeReadValue(base + 0x30, tex) && tex && IsPlausibleObjCObject(tex)) {
+        info.texture = tex;
+        SafeReadValue(base + 0x38, info.width);
+        SafeReadValue(base + 0x3C, info.height);
+        return info;
+    }
+
+    // Fallback: assume gameBuffer itself is the MTLTexture pointer
+    if (IsPlausibleObjCObject(gameBuffer)) {
+        info.texture = gameBuffer;
+    }
+
     return info;
 }
 
@@ -144,7 +155,7 @@ BufferInfo GetDepthBuffer() {
 
 void* GetCurrentCommandBuffer() {
     std::lock_guard<std::mutex> lock(s_mutex);
-    return s_commandBuffer;
+    return IsPlausibleObjCObject(s_commandBuffer) ? s_commandBuffer : nullptr;
 }
 
 float GetJitterX() {
@@ -180,6 +191,31 @@ void SetCurrentResources(
     s_jitterX = jitterX;
     s_jitterY = jitterY;
     s_resetHistory = resetHistory;
+}
+
+void SetCurrentFeatureTextures(MetalFXFeature feature, void* colorTexture, void* outputTexture) {
+    if (feature < 0 || feature >= MetalFXFeature_Count) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_featureColor[feature] = IsPlausibleObjCObject(colorTexture) ? colorTexture : nullptr;
+    s_featureOutput[feature] = IsPlausibleObjCObject(outputTexture) ? outputTexture : nullptr;
+}
+
+BufferInfo GetCurrentFeatureColor(MetalFXFeature feature) {
+    if (feature < 0 || feature >= MetalFXFeature_Count) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(s_mutex);
+    return ExtractBuffer(s_featureColor[feature]);
+}
+
+BufferInfo GetCurrentFeatureOutput(MetalFXFeature feature) {
+    if (feature < 0 || feature >= MetalFXFeature_Count) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(s_mutex);
+    return ExtractBuffer(s_featureOutput[feature]);
 }
 
 } // namespace BufferInterceptor

@@ -8,7 +8,8 @@
 
 #include "NRDHooks.hpp"
 #include "BufferInterceptor.hpp"
-#include "../../lib/Support/macOS/AddressResolverOverride.hpp"
+#include "Config.hpp"
+#include "Support/macOS/AddressResolverOverride.hpp"
 
 #include <iostream>
 #include <atomic>
@@ -44,8 +45,17 @@ static REBLURFunc s_originalREBLUR_DiffuseSpecular = nullptr;
  * Called for diffuse GI denoising
  */
 void HookedREBLUR_Diffuse(void* denoiserState, void* inputBuffer, void* outputBuffer) {
+    const auto& config = Config::Get();
+
     if (!s_enabled.load() || !s_context) {
         // Passthrough to original
+        if (s_originalREBLUR_Diffuse) {
+            s_originalREBLUR_Diffuse(denoiserState, inputBuffer, outputBuffer);
+        }
+        return;
+    }
+
+    if (!config.enabled || !config.features.restirGI) {
         if (s_originalREBLUR_Diffuse) {
             s_originalREBLUR_Diffuse(denoiserState, inputBuffer, outputBuffer);
         }
@@ -98,7 +108,7 @@ void HookedREBLUR_Diffuse(void* denoiserState, void* inputBuffer, void* outputBu
     }
     
     // Perform MetalFX denoising
-    if (!MetalFX_Denoise(s_context, MetalFXFeature_RTXDIDiffuse, cmdBuffer, &params)) {
+    if (!MetalFX_Denoise(s_context, MetalFXFeature_ReSTIRGI, cmdBuffer, &params)) {
         std::cerr << "[MetalFXDenoiser] MetalFX denoising failed for REBLUR_Diffuse" << std::endl;
         if (s_originalREBLUR_Diffuse) {
             s_originalREBLUR_Diffuse(denoiserState, inputBuffer, outputBuffer);
@@ -116,7 +126,16 @@ void HookedREBLUR_Diffuse(void* denoiserState, void* inputBuffer, void* outputBu
  * Called for combined diffuse+specular denoising
  */
 void HookedREBLUR_DiffuseSpecular(void* denoiserState, void* inputBuffer, void* outputBuffer) {
+    const auto& config = Config::Get();
+
     if (!s_enabled.load() || !s_context) {
+        if (s_originalREBLUR_DiffuseSpecular) {
+            s_originalREBLUR_DiffuseSpecular(denoiserState, inputBuffer, outputBuffer);
+        }
+        return;
+    }
+
+    if (!config.enabled) {
         if (s_originalREBLUR_DiffuseSpecular) {
             s_originalREBLUR_DiffuseSpecular(denoiserState, inputBuffer, outputBuffer);
         }
@@ -148,8 +167,15 @@ void HookedREBLUR_DiffuseSpecular(void* denoiserState, void* inputBuffer, void* 
     params.jitterY = BufferInterceptor::GetJitterY();
     params.reset = BufferInterceptor::NeedsHistoryReset();
     
-    // Denoise diffuse channel
-    MetalFX_Denoise(s_context, MetalFXFeature_RTXDIDiffuse, cmdBuffer, &params);
+    // Denoise combined buffer (best-effort); fallback to original on failure
+    const bool ok = MetalFX_Denoise(s_context, MetalFXFeature_ReSTIRGI, cmdBuffer, &params);
+
+    if (!ok) {
+        if (s_originalREBLUR_DiffuseSpecular) {
+            s_originalREBLUR_DiffuseSpecular(denoiserState, inputBuffer, outputBuffer);
+        }
+        return;
+    }
     
     // TODO: Denoise specular separately if textures are split
     // MetalFX_Denoise(s_context, MetalFXFeature_RTXDISpecular, cmdBuffer, &specularParams);
@@ -188,10 +214,17 @@ bool Initialize(MetalFXContext* ctx) {
     
     s_context = ctx;
     
-    // Validate addresses
+    // Log which addresses we're using
+    std::cerr << "[MetalFXDenoiser] Using NRD addresses for game v" << NRD::Address::GAME_VERSION << std::endl;
+    std::cerr << "  REBLUR_Diffuse: 0x" << std::hex << NRD::Address::REBLUR_Diffuse << std::dec << std::endl;
+    std::cerr << "  REBLUR_DiffuseSpecular: 0x" << std::hex << NRD::Address::REBLUR_DiffuseSpecular << std::dec << std::endl;
+    std::cerr << "  SIGMA_Shadow: 0x" << std::hex << NRD::Address::SIGMA_Shadow << std::dec << std::endl;
+    
+    // Validate addresses are in reasonable range
     if (!NRD::Address::ValidateAddresses()) {
-        std::cerr << "[MetalFXDenoiser] Address validation failed - addresses may be outdated" << std::endl;
-        // Continue anyway, hooks will fail gracefully
+        std::cerr << "[MetalFXDenoiser] WARNING: Address validation indicates offsets may be outdated" << std::endl;
+        std::cerr << "[MetalFXDenoiser] Hook resolution may fail - check game version compatibility" << std::endl;
+        // Continue anyway but warn - let it fail naturally if addresses are truly wrong
     }
     
     std::cerr << "[MetalFXDenoiser] Attaching hooks to NRD functions..." << std::endl;
@@ -201,12 +234,14 @@ bool Initialize(MetalFXContext* ctx) {
     s_originalREBLUR_DiffuseSpecular = GetFunctionPointer<REBLURFunc>(NRD::Address::REBLUR_DiffuseSpecular);
     
     if (!s_originalREBLUR_Diffuse || !s_originalREBLUR_DiffuseSpecular) {
-        std::cerr << "[MetalFXDenoiser] Failed to resolve NRD function addresses" << std::endl;
+        std::cerr << "[MetalFXDenoiser] WARNING: Failed to resolve NRD function addresses" << std::endl;
         std::cerr << "  REBLUR_Diffuse @ 0x" << std::hex << NRD::Address::REBLUR_Diffuse 
                   << " = " << (void*)s_originalREBLUR_Diffuse << std::endl;
         std::cerr << "  REBLUR_DiffuseSpecular @ 0x" << NRD::Address::REBLUR_DiffuseSpecular 
                   << " = " << (void*)s_originalREBLUR_DiffuseSpecular << std::endl;
         // Don't fail - addresses might be wrong but we can still try runtime hooking
+    } else {
+        std::cerr << "[MetalFXDenoiser] Successfully resolved NRD function addresses" << std::endl;
     }
     
     // TODO: Use Frida or RED4ext hooking to actually install hooks
@@ -219,7 +254,8 @@ bool Initialize(MetalFXContext* ctx) {
     
     s_initialized = true;
     std::cerr << "[MetalFXDenoiser] Hook infrastructure initialized" << std::endl;
-    std::cerr << "  NOTE: Actual hook installation requires Frida integration" << std::endl;
+    std::cerr << "  NOTE: Runtime hook installation requires Frida integration" << std::endl;
+    std::cerr << "  Load: frida -l metalfx_hooks.js -p <pid>" << std::endl;
     
     return true;
 }

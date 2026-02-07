@@ -45,6 +45,14 @@ typedef enum {
 } MetalFXQuality;
 
 /**
+ * Motion vector input interpretation.
+ */
+typedef enum {
+    MetalFXMotionVectors_Passthrough = 0,
+    MetalFXMotionVectors_NDCToPixels = 1
+} MetalFXMotionVectorMode;
+
+/**
  * Input parameters for denoising operation
  */
 typedef struct {
@@ -143,6 +151,11 @@ bool MetalFX_Denoise(
     MTLCommandBufferRef cmdBuffer,
     const MetalFXDenoiseParams* params
 );
+
+/**
+ * Configure motion vector interpretation/conversion.
+ */
+void MetalFX_SetMotionVectorMode(MetalFXContext* ctx, MetalFXMotionVectorMode mode, bool flipY);
 
 /**
  * Get the Metal device used by the context
