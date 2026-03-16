@@ -155,7 +155,7 @@ strings Cyberpunk2077 | grep -i "motionVector\|velocity"
 ## Building
 
 ```bash
-cd /Users/jackmazac/Development/cp2077-metalfx-denoiser
+cd ~/Development/cyberpunk/cp2077-metalfx-denoiser
 mkdir -p build && cd build
 cmake ..
 make -j8
