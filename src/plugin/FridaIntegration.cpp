@@ -6,6 +6,7 @@
 #include "FridaIntegration.hpp"
 #include "BufferInterceptor.hpp"
 #include "Config.hpp"
+#include "Logger.hpp"
 #include "MetalBridge.h"
 
 #include <iostream>
@@ -73,7 +74,7 @@ bool MetalFX_HookREBLUR_Diffuse(void* denoiserState, void* inputBuffer, void* ou
     void* cmdBuffer = BufferInterceptor::GetCurrentCommandBuffer();
     
     if (!input.texture || !output.texture || !motion.texture || !depth.texture || !cmdBuffer) {
-        std::cerr << "[MetalFX] Buffer extraction failed for REBLUR_Diffuse" << std::endl;
+        Logger::Warn("Buffer extraction failed for REBLUR_Diffuse");
         g_framesFallback++;
         return false;
     }
@@ -100,10 +101,9 @@ bool MetalFX_HookREBLUR_Diffuse(void* denoiserState, void* inputBuffer, void* ou
         g_totalTimeMs.store((total * (frames - 1) + ms) / frames);
 
         if (config.debug.logPerformance > 0 && (frames % (uint64_t)config.debug.logPerformance) == 0) {
-            std::cerr << "[MetalFX] avg_ms=" << g_totalTimeMs.load()
-                      << " processed=" << g_framesProcessed.load()
-                      << " fallback=" << g_framesFallback.load()
-                      << std::endl;
+            Logger::Info(std::string("avg_ms=") + std::to_string(g_totalTimeMs.load()) +
+                         " processed=" + std::to_string(g_framesProcessed.load()) +
+                         " fallback=" + std::to_string(g_framesFallback.load()));
         }
     } else {
         g_framesFallback++;
@@ -201,10 +201,9 @@ bool MetalFX_HookREBLUR_DiffuseSpecular(
         g_totalTimeMs.store((total * (frames - 1) + ms) / frames);
 
         if (config.debug.logPerformance > 0 && (frames % (uint64_t)config.debug.logPerformance) == 0) {
-            std::cerr << "[MetalFX] avg_ms=" << g_totalTimeMs.load()
-                      << " processed=" << g_framesProcessed.load()
-                      << " fallback=" << g_framesFallback.load()
-                      << std::endl;
+            Logger::Info(std::string("avg_ms=") + std::to_string(g_totalTimeMs.load()) +
+                         " processed=" + std::to_string(g_framesProcessed.load()) +
+                         " fallback=" + std::to_string(g_framesFallback.load()));
         }
     } else {
         g_framesFallback++;
@@ -263,7 +262,7 @@ void MetalFX_OnNrdInputsConfigured(void* config) {
     if (!config) return;
     
     // Log for debugging
-    std::cerr << "[MetalFX] NRD inputs configured at " << config << std::endl;
+    Logger::Info(std::string("NRD inputs configured at ") + std::to_string(reinterpret_cast<uintptr_t>(config)));
 
     // Best-effort safe dump (avoid crashing on bad pointers)
     auto safeDump = [](const void* p, size_t n) {

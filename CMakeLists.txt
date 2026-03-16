@@ -55,6 +55,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/BufferInterceptor.cpp
     src/plugin/Config.cpp
     src/plugin/FridaIntegration.cpp
+    src/plugin/Logger.cpp
 )
 
 target_include_directories(MetalFXDenoiser PRIVATE

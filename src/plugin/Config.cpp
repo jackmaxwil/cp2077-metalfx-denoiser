@@ -4,6 +4,7 @@
  */
 
 #include "Config.hpp"
+#include "Logger.hpp"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -71,7 +72,7 @@ bool Load() {
 bool Load(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[Config] Failed to open: " << path << std::endl;
+        Logger::Warn(std::string("Failed to open config: ") + path);
         return false;
     }
     
@@ -140,9 +141,7 @@ bool Load(const std::string& path) {
         }
     }
     
-    std::cerr << "[Config] Loaded settings from: " << path << std::endl;
-    std::cerr << "  enabled: " << (s_settings.enabled ? "true" : "false") << std::endl;
-    std::cerr << "  quality: " << QualityToString(s_settings.quality) << std::endl;
+    Logger::Info(std::string("Loaded settings from: ") + path);
     
     return true;
 }
@@ -150,7 +149,7 @@ bool Load(const std::string& path) {
 bool Save(const std::string& path) {
     std::ofstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[Config] Failed to write: " << path << std::endl;
+        Logger::Warn(std::string("Failed to write config: ") + path);
         return false;
     }
     

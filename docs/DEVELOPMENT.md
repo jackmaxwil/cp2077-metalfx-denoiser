@@ -103,6 +103,22 @@ Interceptor.attach(Module.findBaseAddress("Cyberpunk2077").add(0xF5A408), {
 });
 ```
 
+### Frida integration contract (current)
+
+- Plugin exports are consumed by Frida JS and must be resolved before hook attach:
+  - `MetalFX_HookREBLUR_Diffuse`
+  - `MetalFX_HookREBLUR_DiffuseSpecular`
+  - `MetalFX_HookSIGMA_Shadow`
+  - `MetalFX_SetCurrentResources`
+  - `MetalFX_SetCurrentFeatureTextures`
+  - `MetalFX_IsReplacementActive` (smoke-check export)
+- Recommended launch flow:
+  1. Start game with RED4ext + plugin installed.
+  2. Attach Frida script to process.
+  3. Resolve exports and assert `MetalFX_IsReplacementActive()` returns `true`.
+  4. Install interceptors and route calls to `MetalFX_Hook*` exports.
+  5. Confirm logs show denoising callbacks (or fallback counters) updating.
+
 **Option B: Direct Binary Patching**
 - Patch function prologue to jump to hook
 - Requires code cave or trampoline

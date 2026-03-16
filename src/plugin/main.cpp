@@ -8,9 +8,11 @@
 
 #include <RED4ext/RED4ext.hpp>
 #include <iostream>
+#include <sstream>
 
 #include "NRDHooks.hpp"
 #include "Config.hpp"
+#include "Logger.hpp"
 #include "MetalBridge.h"
 #include "Support/macOS/AddressResolverOverride.hpp"
 
@@ -28,7 +30,7 @@ namespace MetalFXDenoiser {
  * Logging helper for address validation
  */
 static void ValidationLog(const char* msg) {
-    std::cerr << msg << std::endl;
+    Logger::Info(msg ? msg : "");
 }
 
 /**
@@ -36,73 +38,77 @@ static void ValidationLog(const char* msg) {
  */
 bool Initialize() {
     if (g_initialized) {
-        std::cerr << "[MetalFXDenoiser] Already initialized" << std::endl;
+        Logger::Info("Already initialized");
         return true;
     }
     
-    std::cerr << "[MetalFXDenoiser] Initializing MetalFX Denoiser v1.0.0" << std::endl;
-    std::cerr << "[MetalFXDenoiser] Target game version: " << NRD::Address::GAME_VERSION << std::endl;
+    Logger::Initialize();
+    Logger::Info("Initializing MetalFX Denoiser v1.0.0");
+    Logger::Info(std::string("Target game version: ") + NRD::Address::GAME_VERSION);
     
     // Validate addresses before proceeding
-    std::cerr << "[MetalFXDenoiser] Validating NRD addresses..." << std::endl;
+    Logger::Info("Validating NRD addresses...");
     if (!NRD::Address::ValidateAddressesDetailed(ValidationLog)) {
-        std::cerr << "[MetalFXDenoiser] FATAL: Address validation failed" << std::endl;
-        std::cerr << "[MetalFXDenoiser] This mod version is incompatible with your game version" << std::endl;
-        std::cerr << "[MetalFXDenoiser] Please check for mod updates or run address discovery" << std::endl;
+        Logger::Error("Address validation failed");
+        Logger::Error("This mod version is incompatible with your game version");
+        Logger::Error("Please check for mod updates or run address discovery");
         return false;  // Fail-fast: don't load if addresses are wrong
     }
-    std::cerr << "[MetalFXDenoiser] Address validation passed" << std::endl;
+    Logger::Info("Address validation passed");
     
     // Load configuration
     Config::Load();
     const auto& config = Config::Get();
     
-    std::cerr << "[MetalFXDenoiser] Config loaded:" << std::endl;
-    std::cerr << "  Enabled: " << (config.enabled ? "yes" : "no") << std::endl;
-    std::cerr << "  Shadows: " << (config.features.shadows ? "yes" : "no") << std::endl;
-    std::cerr << "  RTXDI Diffuse: " << (config.features.rtxdiDiffuse ? "yes" : "no") << std::endl;
-    std::cerr << "  RTXDI Specular: " << (config.features.rtxdiSpecular ? "yes" : "no") << std::endl;
-    std::cerr << "  GI: " << (config.features.restirGI ? "yes" : "no") << std::endl;
-    std::cerr << "  Reflections: " << (config.features.reflections ? "yes" : "no") << std::endl;
-    std::cerr << "  AO: " << (config.features.ao ? "yes" : "no") << std::endl;
+    {
+        std::ostringstream os;
+        os << "Config loaded: enabled=" << (config.enabled ? "yes" : "no")
+           << " shadows=" << (config.features.shadows ? "yes" : "no")
+           << " rtxdiDiffuse=" << (config.features.rtxdiDiffuse ? "yes" : "no")
+           << " rtxdiSpecular=" << (config.features.rtxdiSpecular ? "yes" : "no")
+           << " gi=" << (config.features.restirGI ? "yes" : "no")
+           << " reflections=" << (config.features.reflections ? "yes" : "no")
+           << " ao=" << (config.features.ao ? "yes" : "no");
+        Logger::Info(os.str());
+    }
     
     if (!config.enabled) {
-        std::cerr << "[MetalFXDenoiser] Plugin disabled in config" << std::endl;
+        Logger::Warn("Plugin disabled in config");
         return true;  // Return true to keep loaded but inactive
     }
     
     // Check MetalFX support
     if (!MetalFX_IsSupported()) {
-        std::cerr << "[MetalFXDenoiser] ERROR: MetalFX not supported on this system" << std::endl;
-        std::cerr << "[MetalFXDenoiser] Requires macOS 13+ on Apple Silicon" << std::endl;
+        Logger::Error("MetalFX not supported on this system");
+        Logger::Error("Requires macOS 13+ on Apple Silicon");
         return false;
     }
     
     // Create MetalFX context (will use game's Metal device if hooked)
     g_metalFXContext = MetalFX_CreateContext(nullptr);
     if (!g_metalFXContext) {
-        std::cerr << "[MetalFXDenoiser] ERROR: Failed to create MetalFX context" << std::endl;
+        Logger::Error("Failed to create MetalFX context");
         return false;
     }
     
-    std::cerr << "[MetalFXDenoiser] MetalFX context created successfully" << std::endl;
+    Logger::Info("MetalFX context created successfully");
     
     // Initialize Frida integration (for external hook calls)
     FridaIntegration_Init(g_metalFXContext);
-    std::cerr << "[MetalFXDenoiser] Frida integration initialized" << std::endl;
+    Logger::Info("Frida integration initialized");
     
     // Attach NRD hooks
     if (!NRDHooks::Initialize(g_metalFXContext)) {
-        std::cerr << "[MetalFXDenoiser] WARNING: Failed to attach NRD hooks" << std::endl;
-        std::cerr << "[MetalFXDenoiser] Use Frida script for hook injection instead" << std::endl;
+        Logger::Warn("Failed to attach NRD hooks");
+        Logger::Warn("Use Frida script for hook injection instead");
         // Don't fail - Frida hooks will handle this
     } else {
-        std::cerr << "[MetalFXDenoiser] NRD hooks attached successfully" << std::endl;
+        Logger::Info("NRD hooks attached successfully");
     }
     
     g_initialized = true;
-    std::cerr << "[MetalFXDenoiser] Initialization complete" << std::endl;
-    std::cerr << "[MetalFXDenoiser] To enable hooks, run: frida -l metalfx_hooks.js -p <pid>" << std::endl;
+    Logger::Info("Initialization complete");
+    Logger::Info("To enable hooks, run: frida -l metalfx_hooks.js -p <pid>");
     
     return true;
 }
@@ -115,7 +121,7 @@ void Shutdown() {
         return;
     }
     
-    std::cerr << "[MetalFXDenoiser] Shutting down..." << std::endl;
+    Logger::Info("Shutting down...");
     
     // Detach hooks first
     NRDHooks::Shutdown();
@@ -130,7 +136,8 @@ void Shutdown() {
     }
     
     g_initialized = false;
-    std::cerr << "[MetalFXDenoiser] Shutdown complete" << std::endl;
+    Logger::Info("Shutdown complete");
+    Logger::Shutdown();
 }
 
 /**

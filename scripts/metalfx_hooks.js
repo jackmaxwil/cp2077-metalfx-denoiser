@@ -145,6 +145,8 @@ function hookREBLUR_Diffuse() {
             onEnter: function(args) {
                 if (!CONFIG.enabled || !CONFIG.diffuseEnabled) return;
                 stats.diffuseCalls++;
+                // Auto-probe for command buffer from denoiser state
+                probeForCommandBuffer(args[0]);
             }
         });
         console.log('[MetalFX] Attached REBLUR_Diffuse @ ' + addr);
@@ -319,10 +321,76 @@ function hookNrdInputs() {
                     nativePlugin.onNrdInputsConfigured(args[0]);
                 } catch (e) {}
             }
+
+            // Auto-capture jitter from NrdInputs struct
+            // Heuristic: scan for plausible float pairs (jitter is typically -0.5..0.5)
+            try {
+                const configPtr = args[0];
+                if (!configPtr.isNull()) {
+                    // Common NRD struct layouts place jitter at offset 0x10-0x20
+                    for (let off = 0x10; off <= 0x30; off += 4) {
+                        const fval = configPtr.add(off).readFloat();
+                        if (Math.abs(fval) > 0.0001 && Math.abs(fval) < 1.0) {
+                            const fval2 = configPtr.add(off + 4).readFloat();
+                            if (Math.abs(fval2) > 0.0001 && Math.abs(fval2) < 1.0) {
+                                currentResources.jitterX = fval;
+                                currentResources.jitterY = fval2;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
         }
     });
     
     console.log('[MetalFX] Hooked NrdInputs @ ' + addr);
+}
+
+// Auto-capture: extract command buffer from NRD arg[0] (denoiser state)
+// NRD denoiser state typically has a command buffer reference at a known offset.
+// This hook runs once at startup to probe arg structure, then caches the offset.
+let cmdBufferOffset = -1;
+let probeCount = 0;
+const MAX_PROBES = 10;
+
+function probeForCommandBuffer(statePtr) {
+    if (probeCount >= MAX_PROBES || cmdBufferOffset >= 0) return;
+    probeCount++;
+
+    // Scan offsets 0x00..0x80 for an Objective-C pointer that looks like MTLCommandBuffer
+    for (let off = 0; off <= 0x80; off += 8) {
+        try {
+            const candidate = statePtr.add(off).readPointer();
+            if (candidate.isNull()) continue;
+            // Check if it responds to MTLCommandBuffer protocol (heuristic: check isa pointer)
+            const isa = candidate.readPointer();
+            if (isa.isNull()) continue;
+            // If isa is in a valid range and looks like an Obj-C class, this might be our cmd buffer
+            const isaVal = isa.toInt32 ? isa.toInt32() : 0;
+            if (isaVal !== 0) {
+                currentResources.cmd = candidate;
+                cmdBufferOffset = off;
+                if (CONFIG.logCalls) {
+                    console.log('[MetalFX] Auto-captured cmd buffer at state+0x' + off.toString(16));
+                }
+                return;
+            }
+        } catch (e) {}
+    }
+}
+
+function probeForTextures(argPtr, featureId) {
+    // NRD buffer args typically wrap an MTLTexture.
+    // Try common offsets: +0x00 (direct pointer), +0x10, +0x30
+    try {
+        if (!argPtr.isNull()) {
+            // Pass raw pointer to native plugin - it has SafeRead-based extraction
+            if (nativePlugin && nativePlugin.setCurrentFeatureTextures) {
+                nativePlugin.setCurrentFeatureTextures(featureId, argPtr, ptr(0));
+            }
+        }
+    } catch (e) {}
 }
 
 // RPC exports for runtime control
