@@ -1,7 +1,10 @@
 # MetalFX Denoiser — Buffer Layout Reference
 
 > **Last updated:** 2026-02-21
-> **Status:** Partial — offsets are heuristic, pending runtime validation
+> **Status:** Partial — offsets are heuristic and unvalidated
+
+> **Note:** this describes the NRD CPU entry points. On macOS they never execute (see `PIPELINE_TRACE_FINDINGS.md`),
+> so the native design works at the Metal compute level instead. Kept as reference for the texture roles MetalFX needs.
 
 ## Overview
 
@@ -67,7 +70,7 @@ The extraction uses `mach_vm_read_overwrite` for safe reads and checks for valid
 
 ## NrdInputs Struct Layout (Heuristic)
 
-From `MetalFX_OnNrdInputsConfigured` hex dump analysis:
+From hex dumps of the NrdInputs struct taken with the earlier tracing tooling:
 
 | Offset Range | Field (guess) | Evidence |
 |-------------|---------------|----------|
@@ -76,11 +79,11 @@ From `MetalFX_OnNrdInputsConfigured` hex dump analysis:
 | `+0x18..+0x1F` | Resolution W, H (uint32 pair) | Values 640..8192 |
 | `+0x20..+0x2F` | Camera data | — |
 
-The heuristic dimension scan in `FridaIntegration.cpp` searches for plausible `uint32` width/height pairs (640-8192 range) at 4-byte intervals.
+The dumps were scanned for plausible `uint32` width/height pairs (640-8192 range) at 4-byte intervals.
 
 ## Command Buffer Extraction
 
-The denoiser state (`x0` in NRD calls) contains a reference to the active `MTLCommandBuffer`. The auto-probe scans offsets `+0x00..+0x80` at 8-byte intervals for pointers that look like Objective-C objects (non-null isa pointer).
+The denoiser state (`x0` in NRD calls) contains a reference to the active `MTLCommandBuffer`. The earlier tracing scanned offsets `+0x00..+0x80` at 8-byte intervals for pointers that look like Objective-C objects (non-null isa pointer).
 
 ## Motion Vectors and Depth
 
@@ -88,7 +91,7 @@ These are NOT passed directly to NRD functions. They must be captured from earli
 
 1. **NrdInputs struct** — may contain pointers to motion/depth textures
 2. **Render node hooks** — `FilterOutput` at `0xFEDE44` processes render node output and may reference the textures
-3. **Pipeline trace** — the debug Frida script has Metal pipeline tracing that can identify texture creation patterns
+3. **Metal compute tracing** — binding signatures identify motion/depth textures directly (`PIPELINE_TRACE_FINDINGS.md`)
 
 ## Resource Flow
 
@@ -113,12 +116,8 @@ Game Render Pipeline
 
 ## Validation Steps
 
-1. Run `frida -l metalfx_hooks.debug.js -f Cyberpunk2077` with RT enabled
-2. Check `[MetalFX] NrdInputs first 128 bytes:` hex dump
-3. Look for jitter values at offsets `+0x10..+0x20`
-4. Look for resolution values at `+0x18..+0x20`
-5. Check `probeForCommandBuffer` auto-detect messages
-6. Verify `ExtractBuffer` finds valid MTLTexture pointers
+Not applicable on macOS while the NRD CPU entry points stay off the hot path. Texture roles are validated from Metal
+compute binding traces instead (`STATUS.md`, next steps).
 
 ## Known Unknowns
 

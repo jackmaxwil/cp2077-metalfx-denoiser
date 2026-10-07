@@ -10,26 +10,20 @@ This document captures the key learnings from the Metal pipeline tracing work us
 - A small set of compute PSOs have denoiser-like binding patterns (many textures, ping-pong history buffers, motion/depth, masks).
 - We can reliably focus tracing using a **PSO allowlist filter**, which makes high-frequency dispatch tracing feasible.
 
-## Tooling used
+## What was measured
 
-- `scripts/metalfx_hooks.js` (Frida)
-  - IMP-based ObjC method hooking (stable vs `objc_msgSend` hooking).
-  - Captures compute pipeline usage:
-    - `setComputePipelineState:`
-    - `setTexture:atIndex:`
-    - `setBuffer:offset:atIndex:`
-    - `setBytes:length:atIndex:`
-    - `dispatchThreadgroups:threadsPerThreadgroup:` / `dispatchThreads:threadsPerThreadgroup:`
-  - Emits `compute_dispatch` events containing texture/buffer/bytes bindings.
-  - Emits `texture_info` events with `w/h/pf/usage/storageMode` for texture pointers.
-  - Supports a PSO allowlist to dramatically reduce noise/overhead.
+An earlier, now retired, out-of-process tracing setup replaced Objective-C method implementations (IMP replacement,
+which was stable where hooking `objc_msgSend` was not) on the compute command encoder and recorded:
 
-- `scripts/supervisor.py` (Python)
-  - Attaches to a running PID and logs to `runs/<timestamp>/`.
-  - Flags:
-    - `--pipeline-trace`
-    - `--pipeline-trace-verbose`
-    - `--pipeline-trace-pso-allow "0x...,0x..."`
+- `setComputePipelineState:`
+- `setTexture:atIndex:`
+- `setBuffer:offset:atIndex:`
+- `setBytes:length:atIndex:`
+- `dispatchThreadgroups:threadsPerThreadgroup:` / `dispatchThreads:threadsPerThreadgroup:`
+
+Each dispatch was logged with its texture/buffer/bytes bindings, and each texture with `w/h/pf/usage/storageMode`.
+A PSO allowlist cut the noise and overhead enough for per-dispatch tracing. Runs were logged to `runs/<timestamp>/`.
+The same measurements are being rebuilt natively in the plugin (`src/plugin/MetalTrace.mm`).
 
 ## Key PSO allowlist (current)
 
@@ -163,12 +157,11 @@ This will make the mod resilient across patches where PSO pointers may change.
 
 - Keep PSO allowlist enabled by default when tracing.
 - Disable all event emission by default; sample only when requested.
-- Move hot-path work out of Frida where possible:
-  - Once slot mapping is proven, port the replacement hook into the native plugin (Objective-C++/C++) for lower overhead.
+- Keep all hot-path work in the native plugin (Objective-C++/C++); the replacement hook lives there.
 
 ### 6) Final validation workflow
 
-- Use the supervisor’s A/B toggle mode to compare:
+- A/B compare (replacement toggled via config):
   - baseline vs replacement
   - per-feature (GI/shadows/reflections) scenarios
 - Record:

@@ -1,58 +1,43 @@
 # MetalFX Denoiser
 
-Replace NVIDIA NRD with Apple MetalFX Temporal Scaler for Cyberpunk 2077 on macOS.
+A RED4ext plugin for the native macOS build of Cyberpunk 2077 (2.3.1, Apple silicon) that aims to replace the game's
+ray-tracing denoiser with Apple MetalFX.
 
-**Status:** Implementation complete — hooks scripted, buffer layout documented, runtime validation pending.
+**Status: research prototype. It does not change rendering yet.** On macOS the NRD CPU entry points never run; the
+denoiser executes as Metal compute pipelines (see `docs/PIPELINE_TRACE_FINDINGS.md`). The plugin currently loads,
+creates a MetalFX context, and can optionally log the compute pipelines the game binds. See `docs/STATUS.md`.
 
-## What it does
+## Quickstart
 
-Intercepts NRD (Real-time Denoisers) calls via Frida hooks and replaces them with Apple's MetalFX Temporal Scaler for hardware-accelerated denoising of ray-traced effects (diffuse GI, specular, shadows).
-
-## Architecture
-
-Two shared libraries:
-
-1. **MetalFXDenoiser.dylib** — RED4ext plugin (C++): entry point, NRD hooks, Frida exports, config
-2. **MetalFXDenoiserCore.dylib** — Metal framework (Objective-C++): MetalFX wrapper, buffer converter, scaler pool
-
-## Prerequisites
-
-- RED4ext installed and functional
-- CMake 3.24+, Clang 15+
-- macOS 14+ (MetalFX API)
-
-## Build
+Requirements: macOS 13+, Apple silicon, CMake 3.20+, Xcode command line tools, RED4ext for macOS installed in the game
+folder, and `vendor/RED4ext.SDK` pointing at the RED4ext.SDK checkout (a symlink to `../../RED4ext.SDK` works).
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(sysctl -n hw.ncpu)
+cmake -S . -B build && cmake --build build -j8   # build only
+scripts/install.sh                               # build + install into the game's red4ext/plugins
 ```
 
-## Runtime testing
+`install.sh` uses the default Steam path; set `GAME_PATH` to override. Start the game with RED4ext's
+`launch_red4ext.sh` and read `red4ext/logs/` for `[MetalFXDenoiser]` lines.
 
-```bash
-# Launch game with RT enabled, then attach Frida
-frida -l scripts/metalfx_hooks.js -p <pid>
+To log the game's compute pipeline states, set this in `red4ext/plugins/MetalFXDenoiser/config.toml`:
 
-# Enable replacement
-rpc.exports.setReplaceEnabled(true)
+```toml
+[debug]
+trace_metal_compute = true
 ```
 
-## Key files
+## Layout
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `src/plugin/NRDHooks.cpp` | NRD function hooks |
-| `src/plugin/FridaIntegration.cpp` | C functions exported for Frida |
-| `scripts/metalfx_hooks.js` | Frida hook script (production) |
-| `framework/MetalFXDenoiser.mm` | MetalFX wrapper |
-| `docs/BUFFER_LAYOUT.md` | NRD struct layouts |
-| `docs/STATUS.md` | Project status |
+| `src/plugin/main.cpp` | RED4ext entry point |
+| `src/plugin/MetalTrace.mm` | Objective-C swizzle of the compute encoder's `setComputePipelineState:` |
+| `src/plugin/BufferInterceptor.cpp` | Texture extraction helpers for the replacement path |
+| `src/plugin/Config.cpp` | `config.toml` parsing |
+| `framework/` | `MetalFXDenoiserCore.dylib`: MetalFX temporal scaler wrapper, scaler pool, buffer converter |
+| `docs/` | Status, research findings, buffer layout notes |
 
-## Related projects
+## License
 
-| Project | Description |
-|---------|-------------|
-| [RED4ext](../RED4ext) | Required mod loader |
-| [RED4ext.SDK](../RED4ext.SDK) | SDK dependency |
+MIT, see `LICENSE`.

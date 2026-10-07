@@ -1,5 +1,8 @@
 # NRD Address Discovery
 
+> **Research notes only.** These offsets were found for game 2.21, are not in RED4ext's verified address DB, and are
+> not used by the plugin. The NRD CPU entry points do not execute on macOS (`PIPELINE_TRACE_FINDINGS.md`).
+
 ## Discovered Addresses (macOS ARM64)
 
 ### NRD Memory Functions (Exported Symbols)
