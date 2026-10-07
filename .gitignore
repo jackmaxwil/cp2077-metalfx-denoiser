@@ -30,13 +30,7 @@ runs/
 scripts/__pycache__/
 scripts/*.pyc
 
-# Debug hooks - development only (large analysis script)
-# To get full debug hooks: cp scripts/metalfx_hooks.min.js scripts/metalfx_hooks.debug.js
-# Then add back the debug features from git history if needed
-scripts/metalfx_hooks.debug.js
-
 # Documentation artifacts
-docs/PIPELINE_TRACE_FINDINGS.md
 docs/*.log
 
 # Temporary files
