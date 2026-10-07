@@ -84,7 +84,7 @@ void SetCurrentResources(
 
 /**
  * Set the current frame's textures for a specific denoising feature.
- * This is intended to be called from Frida hooks where the true MTLTexture pointers are known.
+ * Intended for the Metal compute interception path, where the true MTLTexture pointers are known.
  */
 void SetCurrentFeatureTextures(MetalFXFeature feature, void* colorTexture, void* outputTexture);
 

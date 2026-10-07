@@ -38,6 +38,7 @@ struct Debug {
     int logPerformance = 0;      // Log every N frames (0 = disabled)
     bool showComparison = false; // Side-by-side view
     bool verbose = false;        // Verbose logging
+    bool traceMetalCompute = false; // Log each distinct compute pipeline state the game binds
 };
 
 /**

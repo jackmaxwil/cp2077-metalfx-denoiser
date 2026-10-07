@@ -29,3 +29,6 @@ show_comparison = false
 
 # Verbose logging
 verbose = false
+
+# Log each distinct Metal compute pipeline state the game binds (swizzles the compute encoder)
+trace_metal_compute = false

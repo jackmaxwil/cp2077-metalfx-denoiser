@@ -137,6 +137,8 @@ bool Load(const std::string& path) {
                 s_settings.debug.showComparison = ParseBool(value);
             } else if (key == "verbose") {
                 s_settings.debug.verbose = ParseBool(value);
+            } else if (key == "trace_metal_compute") {
+                s_settings.debug.traceMetalCompute = ParseBool(value);
             }
         }
     }
@@ -173,6 +175,7 @@ bool Save(const std::string& path) {
     file << "log_performance = " << s_settings.debug.logPerformance << "\n";
     file << "show_comparison = " << (s_settings.debug.showComparison ? "true" : "false") << "\n";
     file << "verbose = " << (s_settings.debug.verbose ? "true" : "false") << "\n";
+    file << "trace_metal_compute = " << (s_settings.debug.traceMetalCompute ? "true" : "false") << "\n";
     
     return true;
 }

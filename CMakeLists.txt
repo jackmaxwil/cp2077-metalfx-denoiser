@@ -51,16 +51,16 @@ set_target_properties(MetalFXDenoiserCore PROPERTIES
 # RED4ext Plugin (C++)
 add_library(MetalFXDenoiser SHARED
     src/plugin/main.cpp
-    src/plugin/NRDHooks.cpp
     src/plugin/BufferInterceptor.cpp
     src/plugin/Config.cpp
-    src/plugin/FridaIntegration.cpp
     src/plugin/Logger.cpp
+    src/plugin/MetalTrace.mm
 )
+
+set_source_files_properties(src/plugin/MetalTrace.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 target_include_directories(MetalFXDenoiser PRIVATE
     ${CMAKE_SOURCE_DIR}/src/plugin
-    ${CMAKE_SOURCE_DIR}/lib
     ${CMAKE_SOURCE_DIR}/framework
 )
 
@@ -71,6 +71,8 @@ target_include_directories(MetalFXDenoiser PRIVATE
 
 target_link_libraries(MetalFXDenoiser PRIVATE
     MetalFXDenoiserCore
+    "-framework Metal"
+    "-framework Foundation"
 )
 
 set_target_properties(MetalFXDenoiser PROPERTIES
