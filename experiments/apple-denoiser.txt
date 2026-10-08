@@ -1,0 +1,7 @@
+# Apple-specific denoiser settings (cvarbatch); defaults: preference 1, path tracing mask 255, RTXDI mask 127.
+RayTracing/DenoisingShaderPreferenceAAPL=0 trace
+RayTracing/DenoisingShaderPreferenceAAPL=2
+RayTracing/DenoisingShaderPreferenceAAPL=3
+RayTracing/DenoisingRayTracingShaderMaskAAPL=0
+RayTracing/DenoisingPathTracingShaderMaskAAPL=0
+RayTracing/DenoisingRtxdiShaderMaskAAPL=0

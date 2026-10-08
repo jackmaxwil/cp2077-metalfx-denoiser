@@ -1,0 +1,18 @@
+# Ray tracing and path tracing cost knobs (cvarbatch). Each line: <group>/<name>=<value>; the default is restored after.
+# Control: known +1.5 ms in RT Ultra (full resolution reflections).
+RayTracing/Reflection/EnableHalfResolutionTracing=0
+# SHaRC radiance cache (path tracing): bounces (default 4), downscale (default 5)
+Editor/SHARC/Bounces=2
+Editor/SHARC/Bounces=1
+Editor/SHARC/DownscaleFactor=8
+# Multilayer (layered materials) reflection resolution (default 1.0)
+RayTracing/Multilayer/ResolutionScale=0.5
+# ReSTIR GI sampling (default 2)
+Editor/ReSTIRGI/PermutationSamplingMode=0
+Editor/PathTracing/UseSSRFallback=false
+RayTracing/AmbientOcclusionRayNumber=0
+# Apple-specific: denoiser shader preference (default 1), concurrent dispatch (1), reference path tracer option (2)
+RayTracing/DenoisingShaderPreferenceAAPL=0
+RayTracing/DenoisingConcurrentDispatch=0
+RayTracing/EnableReferenceAAPLOptim=0
+RayTracing/EnableReferenceAAPLOptim=1

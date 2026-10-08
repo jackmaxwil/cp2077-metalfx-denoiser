@@ -18,8 +18,9 @@
 //   "skip metalfx" drops the MetalFX temporal scaler's encode; "skip off".
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "skip listed|refit|raygen|metalfx|off" or "cvar <group>/<name>[=<value>]" (engine config
-// variables, ConfigVars.cpp; results appended to cvar.jsonl). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
+// "capture <name>", "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
+// variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
+// see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
 //
 // Built without ARC: hooks receive their arguments unretained, as the original methods do.
@@ -44,6 +45,7 @@
 #include <atomic>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -432,6 +434,9 @@ struct Perf {
     std::vector<std::vector<std::pair<double, double>>> gpu; // per frame: command buffer GPU intervals
 };
 std::atomic<bool> s_perfActive{false};
+// The window being recorded. Each window has its own buffer: command buffers of its last frames complete after the
+// window ends, while the next window may already be recording.
+std::shared_ptr<struct Perf> s_perfCur;
 
 // Skip test state: the pipelines to drop, and per thread the encoder and whether its bound pipeline is dropped.
 std::atomic<bool> s_skip{false};        // listed pipelines
@@ -443,7 +448,6 @@ std::atomic<uint64_t> s_skipped{0};
 thread_local const void* t_enc = nullptr;
 thread_local bool t_drop = false;
 std::mutex s_perfMutex;
-Perf s_perf;
 
 double Now()
 {
@@ -489,13 +493,12 @@ std::string List(const std::vector<double>& v)
     return out + "]";
 }
 
-void WritePerf()
+void WritePerf(std::shared_ptr<Perf> window)
 {
     Perf p;
     {
         std::lock_guard<std::mutex> lock(s_perfMutex);
-        p = std::move(s_perf);
-        s_perf = {};
+        p = std::move(*window);
     }
     std::vector<double> cpu, busy, span, count;
     for (size_t i = 1; i < p.present.size(); ++i) {
@@ -570,6 +573,145 @@ void SetSkip(bool on, bool raygen = false)
                  std::to_string(fps.size()) + " fingerprints");
 }
 
+void StartPerf(const std::string& name, uint64_t frames, uint64_t frame)
+{
+    auto window = std::make_shared<Perf>();
+    window->name = name;
+    window->frames = frames;
+    window->start = frame + 1;
+    window->skippedAtStart = s_skipped.load();
+    window->gpu.resize(frames);
+    std::lock_guard<std::mutex> lock(s_perfMutex);
+    s_perfCur = window;
+    s_perfActive.store(true);
+}
+
+// --- config variable batch -----------------------------------------------------------------------------------------
+// "cvarbatch": runs the experiments in <plugin dir>/cvar-experiments.txt ("<group>/<name>=<value>" per line, # comments;
+// a trailing " trace" also records frame traces "cvar<i>-exp" and "cvar<i>-base")
+// at the current spot. Per experiment: set, settle, screenshot, timing ("cvar<i>-exp"), restore the value read before,
+// settle, screenshot, timing ("cvar<i>-base"); one timing before the first ("cvar-pre"). Screenshots and the end of
+// the batch are requested from tools/cp-run by appending SHOT / CHECK / DONE events to red4ext/logs/autotest.log.
+struct Batch {
+    std::vector<std::string> lines;
+    std::vector<bool> trace;
+    size_t index = 0;
+    int phase = -1;
+    uint64_t waitUntil = 0;
+    std::string restore;
+    bool active = false;
+};
+Batch s_batch;
+constexpr uint64_t kSettleFrames = 90, kShotFrames = 120, kBatchPerfFrames = 180;
+
+void AutotestEvent(const std::string& json)
+{
+    const std::string plugin = s_dir.substr(0, s_dir.find_last_of('/'));
+    const std::string logs = plugin.substr(0, plugin.find_last_of('/'));
+    std::ofstream(logs.substr(0, logs.find_last_of('/')) + "/logs/autotest.log", std::ios::app) << json << '\n';
+}
+
+void StartBatch(uint64_t frame)
+{
+    s_batch = {};
+    std::ifstream f(s_dir.substr(0, s_dir.find_last_of('/')) + "/cvar-experiments.txt");
+    for (std::string line; std::getline(f, line);) {
+        if (!line.empty() && line[0] != '#' && line.find('=') != std::string::npos) {
+            const bool trace = line.size() > 6 && line.compare(line.size() - 6, 6, " trace") == 0;
+            s_batch.lines.push_back(trace ? line.substr(0, line.size() - 6) : line);
+            s_batch.trace.push_back(trace);
+        }
+    }
+    s_batch.active = !s_batch.lines.empty();
+    s_batch.waitUntil = frame;
+    Logger::Info("Config var batch: " + std::to_string(s_batch.lines.size()) + " experiments");
+}
+
+std::string ValueOf(const std::string& json)
+{
+    const auto key = json.find("\"after\":\"");
+    if (key == std::string::npos) {
+        return {};
+    }
+    const auto start = key + 9;
+    return json.substr(start, json.find('"', start) - start);
+}
+
+void StepBatch(uint64_t frame)
+{
+    Batch& b = s_batch;
+    if (!b.active || frame < b.waitUntil || s_perfActive.load() || s_traceState.load() != TraceState::Idle) {
+        return;
+    }
+    const std::string tag = "cvar" + std::to_string(b.index);
+    const std::string path = b.index < b.lines.size() ? b.lines[b.index].substr(0, b.lines[b.index].find('=')) : "";
+    auto log = [](const std::string& line) { std::ofstream(s_dir + "/cvar.jsonl", std::ios::app) << line << '\n'; };
+    switch (b.phase) {
+    case -1:
+        StartPerf("cvar-pre", kBatchPerfFrames, frame);
+        b.phase = 0;
+        return;
+    case 0: {
+        if (b.index >= b.lines.size()) {
+            AutotestEvent("{\"event\":\"CHECK\",\"name\":\"cvarbatch_done\",\"pass\":true,\"detail\":\"" +
+                          std::to_string(b.lines.size()) + " experiments\"}");
+            AutotestEvent("{\"event\":\"DONE\"}");
+            b.active = false;
+            return;
+        }
+        const std::string current = ConfigVars::Apply(path); // read only: the value to restore
+        b.restore = ValueOf(current);
+        const std::string result = ConfigVars::Apply(b.lines[b.index]);
+        log(result);
+        if (b.restore.empty() || result.find("\"error\"") != std::string::npos) {
+            ++b.index; // refused (not verified, checks failed): nothing was changed
+            return;
+        }
+        b.waitUntil = frame + kSettleFrames;
+        b.phase = 1;
+        return;
+    }
+    case 1:
+        AutotestEvent("{\"event\":\"SHOT\",\"name\":\"" + tag + "-exp\"}");
+        b.waitUntil = frame + kShotFrames;
+        b.phase = 2;
+        return;
+    case 2:
+        StartPerf(tag + "-exp", kBatchPerfFrames, frame);
+        b.phase = 3;
+        return;
+    case 3:
+        if (b.trace[b.index]) {
+            s_traceName = tag + "-exp";
+            s_traceState.store(TraceState::Armed);
+        }
+        b.phase = 7;
+        return;
+    case 7:
+        log(ConfigVars::Apply(path + "=" + b.restore));
+        b.waitUntil = frame + kSettleFrames;
+        b.phase = 4;
+        return;
+    case 4:
+        AutotestEvent("{\"event\":\"SHOT\",\"name\":\"" + tag + "-base\"}");
+        b.waitUntil = frame + kShotFrames;
+        b.phase = 5;
+        return;
+    case 5:
+        StartPerf(tag + "-base", kBatchPerfFrames, frame);
+        b.phase = 6;
+        return;
+    default:
+        if (b.trace[b.index]) {
+            s_traceName = tag + "-base";
+            s_traceState.store(TraceState::Armed);
+        }
+        ++b.index;
+        b.phase = 0;
+        return;
+    }
+}
+
 void PollRequests(uint64_t frame)
 {
     DIR* d = opendir(s_dir.c_str());
@@ -609,14 +751,9 @@ void PollRequests(uint64_t frame)
         s_traceName = name;
         s_traceState.store(TraceState::GpuArmed);
     } else if (kind == "perf" && !name.empty()) {
-        std::lock_guard<std::mutex> lock(s_perfMutex);
-        s_perf = {};
-        s_perf.name = name;
-        s_perf.frames = frames ? frames : 240;
-        s_perf.start = frame + 1;
-        s_perf.skippedAtStart = s_skipped.load();
-        s_perf.gpu.resize(s_perf.frames);
-        s_perfActive.store(true);
+        StartPerf(name, frames ? frames : 240, frame);
+    } else if (kind == "cvarbatch") {
+        StartBatch(frame);
     } else {
         Logger::Warn("Metal trace: unknown request " + reqs[0]);
     }
@@ -726,20 +863,23 @@ void OnPresent(bool fromCommandBuffer)
 
     if (s_perfActive.load()) {
         std::lock_guard<std::mutex> lock(s_perfMutex);
-        if (frame + 1 >= s_perf.start) {
-            s_perf.present.push_back(Now());
+        Perf& p = *s_perfCur;
+        if (frame + 1 >= p.start) {
+            p.present.push_back(Now());
         }
-        if (frame + 1 >= s_perf.start + s_perf.frames) {
+        if (frame + 1 >= p.start + p.frames) {
             s_perfActive.store(false);
             // Let the last frames' command buffers complete.
+            std::shared_ptr<Perf> window = s_perfCur;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC),
                            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                             WritePerf();
+                             WritePerf(window);
                            });
         }
     } else if (s_traceState.load() == TraceState::Idle && frame % 15 == 0) {
         PollRequests(frame);
     }
+    StepBatch(frame);
 }
 
 // --- device: pipeline creation -----------------------------------------------------------------------------------
@@ -1117,15 +1257,19 @@ void H_cbCommit(id self, SEL sel)
     }
     if (s_perfActive.load(std::memory_order_relaxed)) {
         const uint64_t frame = s_frame.load() + 1; // the frame being encoded
-        std::lock_guard<std::mutex> lock(s_perfMutex);
-        if (frame >= s_perf.start && frame < s_perf.start + s_perf.frames) {
-            const size_t index = frame - s_perf.start;
+        std::shared_ptr<Perf> window;
+        {
+            std::lock_guard<std::mutex> lock(s_perfMutex);
+            window = s_perfCur;
+        }
+        if (window && frame >= window->start && frame < window->start + window->frames) {
+            const size_t index = frame - window->start;
             [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
               const double s = cb.GPUStartTime, e = cb.GPUEndTime;
               if (e > s) {
                   std::lock_guard<std::mutex> l(s_perfMutex);
-                  if (index < s_perf.gpu.size()) {
-                      s_perf.gpu[index].emplace_back(s, e);
+                  if (index < window->gpu.size()) {
+                      window->gpu[index].emplace_back(s, e);
                   }
               }
             }];
