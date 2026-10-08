@@ -139,6 +139,8 @@ bool Load(const std::string& path) {
                 s_settings.debug.verbose = ParseBool(value);
             } else if (key == "trace_metal_compute") {
                 s_settings.debug.traceMetalCompute = ParseBool(value);
+            } else if (key == "noisy_lighting") {
+                s_settings.debug.noisyLighting = ParseBool(value);
             }
         }
     }

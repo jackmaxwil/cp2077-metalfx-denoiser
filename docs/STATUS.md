@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-10-08
 > **Target:** Cyberpunk 2077 macOS 2.3.1, Apple silicon, RED4ext for macOS
-> **Status:** research prototype, no rendering changes
+> **Status:** working denoiser (path tracing and RT Ultra/Psycho), player setting in ModMenu and config.toml
 
 ## What works
 
@@ -62,6 +62,17 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    path at the same preset; at Performance it is 25% faster than the game at Quality with a similar still image.
    Next: motion tests (rtbench flicker, ghosting), camera matrices (identity now), RT Ultra (half width checkerboard
    inputs), and making the mode a player setting.
+4b. **Done (2026-10-08): RT Ultra, camera, motion, player setting.**
+   - RT Ultra/Psycho: diffuse and specular RELAX each run in their own encoder; their PrePass (kept) resolves the half
+     width checkerboard; everything after it is dropped and the PrePass output copied to the final output.
+   - Camera matrices from NRD's constant buffer, found through Metal Shader Converter's root arguments and descriptors
+     (MetalTrace keeps the game's large shared heap buffers readable); conventions: `denoisecam game|identity|rh`.
+   - Motion: `RTBENCH_SCENARIO=motion` + `scripts/motion_report.py` (first still frame after walking vs converged).
+     fx recovers at least as well as NRD in path tracing and better in RT Ultra; the camera conventions are within
+     run-to-run noise (about 1.5 dB), so the game's matrices stay.
+   - Player setting: `config.toml` `[metalfx] enabled`, ModMenu page (saved choice wins), `[debug] noisy_lighting`.
+     fx only passes RELAX through while the game calls its MetalFX upscaler (FSR or no upscaling keep NRD).
+   Next: RT Psycho check, a motion test with camera rotation, quality presets (denoiser at Performance by default?).
 4a. **Original plan:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path

@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx" (Denoise.mm), "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh" (Denoise.mm), "motion <name>" (see MotionTick), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <map>
 #include <cstdlib>
 #include <atomic>
 #include <cmath>
@@ -360,7 +361,22 @@ struct Enc {
     std::vector<id> renderTargets;   // dump frames only
     std::vector<std::pair<id, NSUInteger>> uses;          // dump frames: textures declared since the last dispatch
     std::vector<std::pair<id, std::string>> dispatchTex;  // dump frames: textures of dumped dispatches, written at end
+    std::unordered_map<uint32_t, std::pair<id, NSUInteger>> bufs; // dump frames: bound buffers (buffer, offset)
+    std::unordered_map<uint32_t, std::string> bytes;             // dump frames: setBytes contents
+    std::vector<id> useBufs;                                      // dump frames: buffers declared with useResource
 };
+
+// Buffers the game creates (address range, size, storage, frame), metadata only (never dereferenced): names the buffer
+// a root argument address points into when it is not bound or declared on the encoder.
+struct BufMeta {
+    uint64_t len;
+    NSUInteger storage;
+    uint64_t frame;
+    char from;      // d device, h heap
+    id kept = nil;  // shared heap buffers: retained (the heap owns the memory), so their contents stay readable
+};
+std::mutex s_bufMutex;
+std::map<uint64_t, BufMeta> s_bufs;
 
 std::atomic<bool> s_capture{false};
 // Dump: during a traced frame, the targets of render passes with two or more color targets and the MetalFX scaler's
@@ -449,6 +465,8 @@ enum class TraceState { Idle, Armed, Capturing, GpuArmed, GpuCapturing };
 std::atomic<TraceState> s_traceState{TraceState::Idle};
 std::string s_traceName;
 std::string s_dumpName;
+std::atomic<int> s_motion{0}; // "motion" (MotionTick): 0 idle, 1 armed, 2 moving, 3 settling
+std::string s_motionName;
 std::atomic<uint64_t> s_frame{0};
 std::atomic<bool> s_sawCbPresent{false};
 
@@ -803,6 +821,16 @@ void PollRequests(uint64_t frame)
         if (!Denoise::SetMode(name)) {
             Logger::Warn("Metal trace: unknown denoise mode " + name);
         }
+    } else if (kind == "denoisecam") {
+        if (!Denoise::SetCameraMode(name)) {
+            Logger::Warn("Metal trace: unknown camera mode " + name);
+        }
+    } else if (kind == "motion" && !name.empty()) {
+        Denoise::SetWatch(true);
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        s_motionName = name;
+        s_motion.store(1);
+        Logger::Info("Metal trace: motion " + name + " armed");
     } else if (kind == "cvarbatch") {
         StartBatch(frame);
     } else {
@@ -1576,6 +1604,200 @@ void H_drPresentAfter(id self, SEL sel, CFTimeInterval t)
 
 // --- encoders ----------------------------------------------------------------------------------------------------
 Orig o_setCps, o_setTex, o_setTexs, o_setAS, o_setIFT, o_dispTG, o_dispTh, o_dispInd, o_endEnc, o_setRps, o_exec;
+Orig o_setBuf, o_setBufOff, o_setBytes;
+
+Orig o_newBuf, o_newBufBytes, o_heapBuf, o_heapBufOff;
+
+void NoteBuffer(id buf, char from)
+{
+    if (!buf) {
+        return;
+    }
+    id<MTLBuffer> b = buf;
+    // Kept: large shared heap buffers (descriptor heaps, upload rings; few and long-lived; the heap owns the memory).
+    const bool keep = from == 'h' && b.storageMode == MTLStorageModeShared && b.length >= (16u << 20);
+    std::lock_guard<std::mutex> lock(s_bufMutex);
+    BufMeta& m = s_bufs[b.gpuAddress];
+    [m.kept release];
+    m = {b.length, b.storageMode, s_frame.load(), from, keep ? [buf retain] : nil};
+}
+
+id H_newBuf(id self, SEL sel, NSUInteger len, NSUInteger opts)
+{
+    id b = ORIG(o_newBuf, id (*)(id, SEL, NSUInteger, NSUInteger), self)(self, sel, len, opts);
+    NoteBuffer(b, 'd');
+    return b;
+}
+
+id H_newBufBytes(id self, SEL sel, const void* bytes, NSUInteger len, NSUInteger opts)
+{
+    id b = ORIG(o_newBufBytes, id (*)(id, SEL, const void*, NSUInteger, NSUInteger), self)(self, sel, bytes, len, opts);
+    NoteBuffer(b, 'd');
+    return b;
+}
+
+id H_heapBuf(id self, SEL sel, NSUInteger len, NSUInteger opts)
+{
+    id b = ORIG(o_heapBuf, id (*)(id, SEL, NSUInteger, NSUInteger), self)(self, sel, len, opts);
+    NoteBuffer(b, 'h');
+    return b;
+}
+
+id H_heapBufOff(id self, SEL sel, NSUInteger len, NSUInteger opts, NSUInteger off)
+{
+    id b = ORIG(o_heapBufOff, id (*)(id, SEL, NSUInteger, NSUInteger, NSUInteger), self)(self, sel, len, opts, off);
+    NoteBuffer(b, 'h');
+    return b;
+}
+
+// Dump frames: compute buffer bindings, to decode the root arguments (Metal Shader Converter's top-level argument buffer
+// at index 2) of the dumped dispatches, see RootEvent.
+void H_setBuf(id self, SEL sel, id buf, NSUInteger offset, NSUInteger index)
+{
+    if (index == 2 && Denoise::Active()) {
+        Denoise::SetRoot(self, buf, offset, false);
+    }
+    if (s_dump.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        EncOf(self).bufs[static_cast<uint32_t>(index)] = {buf, offset};
+    }
+    ORIG(o_setBuf, void (*)(id, SEL, id, NSUInteger, NSUInteger), self)(self, sel, buf, offset, index);
+}
+
+void H_setBufOff(id self, SEL sel, NSUInteger offset, NSUInteger index)
+{
+    if (index == 2 && Denoise::Active()) {
+        Denoise::SetRoot(self, nil, offset, true);
+    }
+    if (s_dump.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        EncOf(self).bufs[static_cast<uint32_t>(index)].second = offset;
+    }
+    ORIG(o_setBufOff, void (*)(id, SEL, NSUInteger, NSUInteger), self)(self, sel, offset, index);
+}
+
+void H_setBytes(id self, SEL sel, const void* bytes, NSUInteger length, NSUInteger index)
+{
+    if (s_dump.load(std::memory_order_relaxed) && bytes) {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        EncOf(self).bytes[static_cast<uint32_t>(index)].assign(static_cast<const char*>(bytes), length);
+    }
+    ORIG(o_setBytes, void (*)(id, SEL, const void*, NSUInteger, NSUInteger), self)(self, sel, bytes, length, index);
+}
+
+std::string HexOf(const void* p, size_t n)
+{
+    static const char* d = "0123456789abcdef";
+    std::string out;
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t b = static_cast<const uint8_t*>(p)[i];
+        out += d[b >> 4];
+        out += d[b & 15];
+    }
+    return out;
+}
+
+// Caller holds s_capMutex. The root arguments of a dumped dispatch: the bytes at buffer index 2 (setBuffer contents
+// when CPU visible, or setBytes), and for every 8-byte value that is a GPU address inside a buffer bound to this
+// encoder, 1 KiB of that buffer from there.
+std::string RootEvent(const Enc& e)
+{
+    std::string out;
+    std::vector<std::pair<const uint8_t*, size_t>> roots;
+    auto b = e.bufs.find(2);
+    if (b != e.bufs.end() && b->second.first) {
+        id<MTLBuffer> buf = b->second.first;
+        out += ",\"root\":{\"buf\":" + P((__bridge const void*)buf) + ",\"len\":" + std::to_string(buf.length) +
+               ",\"off\":" + std::to_string(b->second.second) + ",\"storage\":" + std::to_string(buf.storageMode) +
+               ",\"va\":" + std::to_string(buf.gpuAddress);
+        if (buf.storageMode != MTLStorageModePrivate && b->second.second + 256 <= buf.length) {
+            roots.emplace_back(static_cast<const uint8_t*>(buf.contents) + b->second.second, 256);
+            out += ",\"hex\":\"" + HexOf(roots.back().first, 256) + "\"";
+        }
+        out += "}";
+    }
+    auto y = e.bytes.find(2);
+    if (y != e.bytes.end()) {
+        roots.emplace_back(reinterpret_cast<const uint8_t*>(y->second.data()), y->second.size());
+        out += ",\"rootbytes\":\"" + HexOf(y->second.data(), y->second.size()) + "\"";
+    }
+    std::vector<id> alive; // bound or declared on this encoder, so safe to read
+    for (const auto& [index, bound] : e.bufs) {
+        alive.push_back(bound.first);
+    }
+    alive.insert(alive.end(), e.useBufs.begin(), e.useBufs.end());
+    std::string targets;
+    for (const auto& [p, n] : roots) {
+        for (size_t i = 0; i + 8 <= n && i < 256; i += 8) {
+            uint64_t va;
+            std::memcpy(&va, p + i, 8);
+            if (va < (1ull << 32)) {
+                continue;
+            }
+            std::string hit;
+            for (id<MTLBuffer> buf : alive) {
+                if (!buf || va < buf.gpuAddress || va >= buf.gpuAddress + buf.length) {
+                    continue;
+                }
+                hit = ",\"buf\":" + P((__bridge const void*)buf) + ",\"len\":" + std::to_string(buf.length) +
+                      ",\"storage\":" + std::to_string(buf.storageMode) + ",\"off\":" +
+                      std::to_string(va - buf.gpuAddress);
+                if (buf.storageMode != MTLStorageModePrivate) {
+                    const size_t take = std::min<uint64_t>(1024, buf.gpuAddress + buf.length - va);
+                    hit += ",\"hex\":\"" + HexOf(static_cast<const uint8_t*>(buf.contents) + (va - buf.gpuAddress), take) +
+                           "\"";
+                }
+                break;
+            }
+            if (hit.empty()) {
+                std::lock_guard<std::mutex> lock(s_bufMutex);
+                auto it = s_bufs.upper_bound(va);
+                if (it != s_bufs.begin() && va < std::prev(it)->first + std::prev(it)->second.len) {
+                    const auto& m = std::prev(it)->second;
+                    hit = ",\"reg\":{\"va\":" + std::to_string(std::prev(it)->first) + ",\"len\":" +
+                          std::to_string(m.len) + ",\"storage\":" + std::to_string(m.storage) + ",\"frame\":" +
+                          std::to_string(m.frame) + ",\"from\":\"" + std::string(1, m.from) + "\"}";
+                    if (m.kept) {
+                        // 256 bytes there; and, for every 8-byte value in them that is again an address inside a kept
+                        // buffer (a descriptor's buffer address: Metal Shader Converter descriptors are 24 bytes,
+                        // address first), 1 KiB from that address.
+                        const uint64_t off = va - std::prev(it)->first;
+                        const uint8_t* at = static_cast<const uint8_t*>([(id<MTLBuffer>)m.kept contents]) + off;
+                        const size_t take = std::min<uint64_t>(256, m.len - off);
+                        hit += ",\"off\":" + std::to_string(off) + ",\"hex\":\"" + HexOf(at, take) + "\"";
+                        std::string deep;
+                        for (size_t j = 0; j + 8 <= take; j += 8) {
+                            uint64_t va2;
+                            std::memcpy(&va2, at + j, 8);
+                            auto it2 = s_bufs.upper_bound(va2);
+                            if (va2 < (1ull << 32) || it2 == s_bufs.begin()) {
+                                continue;
+                            }
+                            const auto& m2 = std::prev(it2)->second;
+                            const uint64_t off2 = va2 - std::prev(it2)->first;
+                            if (!m2.kept || off2 >= m2.len) {
+                                continue;
+                            }
+                            deep += std::string(deep.empty() ? "" : ",") + "{\"at\":" + std::to_string(j) +
+                                    ",\"len\":" + std::to_string(m2.len) + ",\"off\":" + std::to_string(off2) +
+                                    ",\"hex\":\"" +
+                                    HexOf(static_cast<const uint8_t*>([(id<MTLBuffer>)m2.kept contents]) + off2,
+                                          std::min<uint64_t>(1024, m2.len - off2)) + "\"}";
+                        }
+                        if (!deep.empty()) {
+                            hit += ",\"deep\":[" + deep + "]";
+                        }
+                    }
+                }
+            }
+            targets += std::string(targets.empty() ? "" : ",") + "{\"at\":" + std::to_string(i) + hit + "}";
+        }
+    }
+    if (!targets.empty()) {
+        out += ",\"targets\":[" + targets + "]";
+    }
+    return out;
+}
 Orig o_asBuild, o_asRefit, o_asRefitOpt, o_asCompact;
 using SetTex = void (*)(id, SEL, id, NSUInteger);
 using SetTexs = void (*)(id, SEL, const id*, NSRange);
@@ -1683,6 +1905,8 @@ void NoteUse(id self, id const* res, NSUInteger count, NSUInteger usage)
             if (s_dump.load() && !s_dumpPipes.empty()) {
                 EncOf(self).uses.emplace_back(r, usage);
             }
+        } else if (s_dump.load() && [r respondsToSelector:@selector(gpuAddress)]) {
+            EncOf(self).useBufs.push_back(r);
         }
         line += (i ? "," : "") + P((__bridge const void*)r);
     }
@@ -1804,6 +2028,7 @@ void EmitDispatch(id self, const char* mode, MTLSize a, MTLSize b)
         if (it != s_pipes.end()) {
             const std::string& key = s_dumpPipes.count(it->second.label) ? it->second.label : it->second.name;
             if (s_dumpPipes.count(key)) {
+                Emit("{\"e\":\"root\"," + SeqField() + ",\"pipe\":" + Q(key.c_str()) + RootEvent(e) + "}");
                 for (const auto& [t, usage] : e.uses) {
                     e.dispatchTex.emplace_back(t, key + (usage == 1 ? "-r" : usage == 2 ? "-w" : "-rw"));
                 }
@@ -1984,6 +2209,55 @@ std::string FxTex(const char* key, id<MTLTexture> t)
     return ",\"" + std::string(key) + "\":" + P((__bridge const void*)t);
 }
 
+// "motion <name>": waits for the camera to move (NRD's camera, Denoise::Camera), then writes the upscaler output of the
+// first frame after it stops (<name>-..-still0) and of the frame 90 frames later (<name>-..-still90). Their difference
+// is what motion left behind (ghosting, lag, disocclusion noise); scripts/motion_report.py compares them.
+int s_motionFrames = 0;
+uint64_t s_motionSerial = 0;
+float s_motionView[16];
+
+void MotionTick(id cb, id<MTLTexture> output)
+{
+    float delta[4], view[16];
+    uint64_t serial = 0;
+    if (!Denoise::Camera(delta, view, serial) || serial == s_motionSerial) {
+        return;
+    }
+    float change = std::fabs(delta[0]) + std::fabs(delta[1]) + std::fabs(delta[2]);
+    for (int i = 0; i < 16; ++i) {
+        change += std::fabs(view[i] - s_motionView[i]);
+    }
+    s_motionSerial = serial;
+    std::memcpy(s_motionView, view, sizeof(view));
+    const bool moving = change > 1e-5f;
+    std::lock_guard<std::mutex> lock(s_capMutex);
+    const std::string keep = s_dumpName;
+    s_dumpName = s_motionName;
+    switch (s_motion.load()) {
+    case 1:
+        if (moving) {
+            s_motion.store(2);
+            Logger::Info("Metal trace: motion " + s_motionName + " moving");
+        }
+        break;
+    case 2:
+        if (!moving) {
+            DumpTexture(cb, output, "still0");
+            s_motionFrames = 0;
+            s_motion.store(3);
+        }
+        break;
+    case 3:
+        if (++s_motionFrames == 90) {
+            DumpTexture(cb, output, "still90");
+            s_motion.store(0);
+            Logger::Info("Metal trace: motion " + s_motionName + " done");
+        }
+        break;
+    }
+    s_dumpName = keep;
+}
+
 void H_fxTemporalEncode(id self, SEL sel, id cb)
 {
     if (s_skipMetalFX.load(std::memory_order_relaxed)) {
@@ -2015,6 +2289,9 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
     }
     if (!(Denoise::Active() && Denoise::EncodeScaler(self, cb))) {
         ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
+    }
+    if (s_motion.load(std::memory_order_relaxed)) {
+        MotionTick(cb, [(id<MTLFXTemporalScaler>)self outputTexture]);
     }
     if (s_dump.load()) {
         id<MTLFXTemporalScaler> sc = self;
@@ -2101,13 +2378,13 @@ bool Install()
     if (const char* r = std::getenv("METALFX_TRACE_REFLECTION")) {
         s_reflection = r[0] != '0';
     }
-    if (const char* m = std::getenv("METALFX_DENOISE")) {
+    if (const char* m = std::getenv("METALFX_DENOISE"); m && *m) {
         Denoise::SetMode(m);
     }
 
     // The driver's classes are private (AGX...), so find them by making one object of each kind.
     Class device = nil, queueCb = nil, compute = nil, computeConc = nil, render = nil, blit = nil, accel = nil,
-          library = nil, parallel = nil;
+          library = nil, parallel = nil, heap = nil;
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) {
@@ -2115,6 +2392,13 @@ bool Install()
             return false;
         }
         device = object_getClass(dev);
+        MTLHeapDescriptor* hd = [MTLHeapDescriptor new];
+        hd.size = 1 << 16;
+        hd.type = MTLHeapTypePlacement;
+        id<MTLHeap> h = [dev newHeapWithDescriptor:hd];
+        heap = object_getClass(h);
+        [h release];
+        [hd release];
         id<MTLLibrary> lib = [dev newLibraryWithSource:@"kernel void probe() {}" options:nil error:nil];
         library = object_getClass(lib);
         [lib release];
@@ -2170,6 +2454,12 @@ bool Install()
     H(device, @selector(newComputePipelineStateWithDescriptor:options:reflection:error:), (IMP)H_cpsDescOptRefl,
       o_cpsDescOptRefl);
     H(device, @selector(newComputePipelineStateWithFunction:error:), (IMP)H_cpsFn, o_cpsFn);
+    H(device, @selector(newBufferWithLength:options:), (IMP)H_newBuf, o_newBuf);
+    H(device, @selector(newBufferWithBytes:length:options:), (IMP)H_newBufBytes, o_newBufBytes);
+    if (heap) {
+        H(heap, @selector(newBufferWithLength:options:), (IMP)H_heapBuf, o_heapBuf);
+        H(heap, @selector(newBufferWithLength:options:offset:), (IMP)H_heapBufOff, o_heapBufOff);
+    }
     H(device, @selector(newComputePipelineStateWithFunction:options:completionHandler:), (IMP)H_cpsFnOptAsync,
       o_cpsFnOptAsync);
     H(device, @selector(newComputePipelineStateWithDescriptor:options:completionHandler:), (IMP)H_cpsDescOptAsync,
@@ -2224,6 +2514,9 @@ bool Install()
     for (Class cls : {compute, computeConc}) {
         H(cls, @selector(setComputePipelineState:), (IMP)H_setCps, o_setCps);
         H(cls, @selector(setTexture:atIndex:), (IMP)H_setTex, o_setTex);
+        H(cls, @selector(setBuffer:offset:atIndex:), (IMP)H_setBuf, o_setBuf);
+        H(cls, @selector(setBufferOffset:atIndex:), (IMP)H_setBufOff, o_setBufOff);
+        H(cls, @selector(setBytes:length:atIndex:), (IMP)H_setBytes, o_setBytes);
         H(cls, @selector(setTextures:withRange:), (IMP)H_setTexs, o_setTexs);
         H(cls, @selector(setAccelerationStructure:atBufferIndex:), (IMP)H_setAS, o_setAS);
         H(cls, @selector(setIntersectionFunctionTable:atBufferIndex:), (IMP)H_setIFT, o_setIFT);
@@ -2281,6 +2574,20 @@ bool Install()
     Logger::Info(buf);
     s_installedAll = true;
     return true;
+}
+
+const uint8_t* MapGpuAddress(uint64_t gpuAddress, size_t len)
+{
+    std::lock_guard<std::mutex> lock(s_bufMutex);
+    auto it = s_bufs.upper_bound(gpuAddress);
+    if (it == s_bufs.begin()) {
+        return nullptr;
+    }
+    --it;
+    if (!it->second.kept || gpuAddress - it->first + len > it->second.len) {
+        return nullptr;
+    }
+    return static_cast<const uint8_t*>([(id<MTLBuffer>)it->second.kept contents]) + (gpuAddress - it->first);
 }
 
 void Uninstall()

@@ -1,34 +1,15 @@
-# MetalFX Denoiser Configuration
-# Game: Cyberpunk 2077 macOS
+# MetalFX Denoiser (Cyberpunk 2077 2.3.1, macOS 26 or later, Apple silicon)
 
 [metalfx]
-# Enable MetalFX denoising (set to false to use original NRD)
+# Apple's MetalFX denoiser in place of the game's ray tracing denoiser (NRD) and MetalFX upscaler.
+# Applies with ray traced lighting (Ultra, Psycho) or path tracing, with the game's upscaler set to MetalFX
+# (Resolution Scaling). Path tracing: about as fast as NRD at the same preset, and clean enough at Performance.
+# Also switchable in game: ModMenu (` or F10) > MetalFX Denoiser; ModMenu saves that choice and it wins over this one.
 enabled = true
 
-# Quality preset: "performance", "balanced", "quality"
-quality = "quality"
-
-# Sharpening amount (0.0 - 1.0)
-sharpness = 0.5
-
-[features]
-# Enable/disable individual RT features
-shadows = true
-rtxdi_diffuse = true
-rtxdi_specular = true
-restir_gi = true
-reflections = true
-ao = true
-
 [debug]
-# Log performance metrics every N frames (0 = disabled)
-log_performance = 0
+# Show the noisy lighting (NRD off, no denoiser): for comparisons only.
+noisy_lighting = false
 
-# Show comparison view (NRD vs MetalFX side-by-side)
-show_comparison = false
-
-# Verbose logging
-verbose = false
-
-# Log each distinct Metal compute pipeline state the game binds (swizzles the compute encoder)
+# Metal tracer for research (pipeline names, frame traces, timings); METALFX_TRACE=1 does the same.
 trace_metal_compute = false

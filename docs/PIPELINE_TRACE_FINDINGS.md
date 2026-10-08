@@ -146,6 +146,30 @@ overlap on the GPU):
 - `Developer/FeatureToggles/DLSSD` (the game's Ray Reconstruction path, `m_rayTracedReference_DLSSD_*` shaders) set to
   1 changes nothing on macOS: NRD still runs, and the upscaler options are Off, FSR2, FSR3 and MetalFX only.
 
+## RT Ultra, camera matrices and motion (2026-10-08)
+
+- **RT Ultra RELAX:** diffuse (encoder: PrePass 2146613912, TemporalAccumulation 471566690, HistoryFix 3056446971,
+  HistoryClamping 3324492930, AntiFirefly 258640069, AtrousSmem 610715217, four a-trous 1741889550) and specular
+  (PrePass 2571244900, TemporalAccumulation 2320542953, HistoryFix 871526259, HistoryClamping 1863037915, AntiFirefly
+  482482882, AtrousSmem 2465595461, four a-trous 3863891985). Several order-only names in these encoders are wrong
+  (`m_distortion_11`, `m_computeShadingRateImage_TileSize16`). Each PrePass writes one full resolution RGBA16Float (the
+  checkerboard resolved); the last a-trous pass writes the output. Denoise mode, RT Ultra at Quality (frame interval):
+  pass saves 1.14 ms, fx costs 0.47 ms more than NRD (RELAX is cheaper here than in path tracing).
+- **Root arguments:** the top-level argument buffer (index 2) lives in a 128 MiB shared upload ring; its entries are
+  addresses of descriptor tables in a 32 MiB shared descriptor heap (both heap buffers); Metal Shader Converter
+  descriptors are 24 bytes, the buffer address first. RELAX's root entry 0, descriptor 6, is NRD's constant buffer
+  (RELAX shared constants, column-major): gWorldToClipPrev +0, gWorldToViewPrev +64, gWorldToClip +128,
+  gWorldPrevToWorld +192, gViewToWorld +256, frustum vectors +320, gCameraDelta +416, resource size +496. The engine
+  renders camera-relative: gViewToWorld has no translation; walking shows up in gCameraDelta.
+- **Motion** (`RTBENCH_SCENARIO=motion`, PSNR of the first still frame after a 1.2 s walk against 90 frames later,
+  higher is better; three runs):
+
+  | Run | off (NRD) | fx, game matrices | fx, identity | fx, right-handed |
+  | --- | ---: | ---: | ---: | ---: |
+  | path tracing 1 | 34.3 | 35.7 | 37.2 | 37.2 |
+  | path tracing 2 | 34.8 | 35.5 | 34.7 | 35.5 |
+  | RT Ultra | 37.3 | 41.1 | 38.8 | 39.7 |
+
 ## Apple's denoised scaler: cost (`build/denoiser_bench`, 2026-10-08)
 
 `MTLFXTemporalDenoisedScaler` against the plain `MTLFXTemporalScaler`, M4 Max, idle GPU, game formats (color

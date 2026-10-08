@@ -39,6 +39,7 @@ struct Debug {
     bool showComparison = false; // Side-by-side view
     bool verbose = false;        // Verbose logging
     bool traceMetalCompute = false; // Log each distinct compute pipeline state the game binds
+    bool noisyLighting = false;     // Denoiser "pass" mode: NRD off, noisy lighting shown (comparisons)
 };
 
 /**

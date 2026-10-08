@@ -1,34 +1,46 @@
-// Path tracing denoiser prototype: NRD pass-through plus MetalFX's temporal denoised scaler. Built with ARC.
+// Ray traced denoiser: NRD RELAX pass-through plus MetalFX's temporal denoised scaler. Built with ARC.
 //
-// Modes (environment METALFX_DENOISE, or the tracer request "denoise off|pass|fx"):
-// - pass: path tracing's RELAX dispatches are dropped, and each RELAX instance's noisy inputs are copied to its outputs,
-//   so the game composites noisy lighting. The game's MetalFX temporal scaler still runs.
+// Modes (config.toml [denoiser] mode, environment METALFX_DENOISE, or the tracer request "denoise off|pass|fx"):
+// - pass: RELAX's dispatches are dropped and its noisy (or checkerboard-resolved) inputs are copied to its outputs, so
+//   the game composites noisy lighting. The game's MetalFX temporal scaler still runs.
 // - fx: pass, plus the game's MetalFX temporal scaler call is replaced by MTLFXTemporalDenoisedScaler (macOS 26), fed
-//   guide textures made from the G-buffer.
+//   guide textures made from the G-buffer and the camera matrices from NRD's constants.
 //
-// Path tracing's RELAX runs in one serial compute encoder (RED4ext/runs/20261008-131010-dump): two instances, each
-// starting with HitDistReconstruction (label 2684890295, first instance only) or PrePass (1624964913), which read the
-// two noisy RGBA16Float radiance textures (diffuse, specular), and ending with four a-trous iterations (1807644384),
-// the last of which writes the instance's two outputs. Every dispatch from an instance's first pass to its last a-trous
-// iteration is dropped; the copies are encoded into the same encoder just before it ends, after a texture barrier.
-// The labels are the engine's compute pipeline labels, stable across runs; nothing happens if they are not seen.
+// RELAX chains (PIPELINE_TRACE_FINDINGS.md; labels are the engine's compute pipeline labels, stable across runs;
+// nothing happens where they are not seen, so raster frames are untouched):
+// - Path tracing, one serial encoder, two instances: HitDistReconstruction (2684890295, first instance only) or PrePass
+//   (1624964913) reads the two noisy RGBA16Float radiance textures (diffuse, specular); four a-trous iterations
+//   (1807644384) follow, the last writing both outputs. Everything from the first pass to the last iteration is dropped.
+// - RT Ultra/Psycho, one encoder each for diffuse and specular: the PrePass (2146613912 diffuse, 2571244900 specular)
+//   resolves the half width checkerboard into one RGBA16Float texture and keeps running; everything after it up to the
+//   last a-trous iteration (1741889550 diffuse, 3863891985 specular), which writes the output, is dropped.
+// The copies are encoded into the same encoder just before it ends, after a texture barrier.
 //
-// G-buffer (PIPELINE_TRACE_FINDINGS.md): render passes with BGR10A2Unorm, BGR10A2Unorm, RGBA8Unorm targets hold base
-// color, world-space normal (xyz * 0.5 + 0.5) and metalness (R) / roughness (G). The guide textures are written from
-// them in the RELAX encoder too, where the G-buffer is certainly alive.
+// G-buffer: render passes with BGR10A2Unorm, BGR10A2Unorm, RGBA8Unorm targets hold base color, world-space normal
+// (xyz * 0.5 + 0.5) and metalness (R) / roughness (G). The guide textures are written from them once per frame in a
+// RELAX encoder, where the G-buffer is certainly alive.
 //
-// ponytail: camera matrices are identity (world-space normals passed as view-space); find the engine's view and
-// projection matrices if the denoiser needs them.
+// Camera: NRD's constant buffer (RELAX shared constants: gWorldToClipPrev, gWorldToViewPrev, gWorldToClip at +128,
+// gWorldPrevToWorld, gViewToWorld at +256, frustum vectors, gCameraDelta at +416, ..., the resource size at +496; HLSL
+// column-major, so each float4 is a column, as in simd_float4x4). It is found at the chain's first dispatch through
+// Metal Shader Converter's root arguments: the top-level argument buffer (index 2) holds descriptor table addresses;
+// each 24-byte descriptor starts with a buffer address; the constant buffer is the one whose resource size matches the
+// noisy texture and whose gViewToWorld is a rotation (the engine renders camera-relative, so it has no translation).
+// The buffers are read through MetalTrace's registry of the game's large shared heap buffers.
 
 #include "Denoise.hpp"
 #include "Logger.hpp"
+#include "MetalTrace.hpp"
 
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -37,16 +49,45 @@ namespace {
 
 enum Mode { Off, Pass, Fx };
 std::atomic<int> g_mode{Off};
+std::atomic<bool> g_watch{false}; // read the camera even when off (motion tests)
+enum CamMode { CamGame, CamIdentity, CamRightHanded };
+std::atomic<int> g_camMode{CamGame};
 
-const std::string kHitDist = "2684890295", kPrePass = "1624964913", kAtrous = "1807644384";
+struct Chain {
+    const char* name;
+    const char* start[2];
+    bool keepStart; // the first pass keeps running; its RGBA16Float output is the copy source
+    const char* end;
+    size_t width;   // textures per instance
+};
+const Chain kChains[] = {
+    {"path tracing", {"2684890295", "1624964913"}, false, "1807644384", 2},
+    {"diffuse", {"2146613912", nullptr}, true, "1741889550", 1},
+    {"specular", {"2571244900", nullptr}, true, "3863891985", 1},
+};
+
+const Chain* StartOf(const std::string& label)
+{
+    for (const Chain& c : kChains) {
+        for (const char* s : c.start) {
+            if (s && label == s) {
+                return &c;
+            }
+        }
+    }
+    return nullptr;
+}
 
 struct Job {
-    id<MTLTexture> in[2], out[2];
+    id<MTLTexture> in, out;
 };
 
 struct Enc {
     std::string label;
     std::vector<std::pair<__unsafe_unretained id, unsigned long>> uses;
+    __unsafe_unretained id root = nil; // the top-level argument buffer (index 2), alive while bound
+    unsigned long rootOffset = 0;
+    const Chain* chain = nullptr;
     bool open = false;
     int atrous = 0;
     std::vector<id<MTLTexture>> in, out;
@@ -59,6 +100,26 @@ id<MTLTexture> g_gbuf[3];
 std::atomic<int> g_logged{0};
 bool g_failed = false; // fx: setup failed, the game's scaler runs
 
+// Frame bookkeeping, in scaler calls (one per frame): the frame the last copies and guides were encoded in.
+std::atomic<uint64_t> g_frame{0}, g_passFrame{~0ull}, g_guideFrame{~0ull};
+// When the game last called its MetalFX temporal scaler. fx passes RELAX through only while it does (another
+// upscaler, FSR, would otherwise show the noisy lighting).
+std::atomic<int64_t> g_scalerMs{-1000000};
+
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+struct Camera {
+    simd_float4x4 worldToClip, viewToWorld;
+    float delta[4];
+    uint64_t serial = 0;
+};
+Camera g_cam; // guarded by g_mutex
+std::atomic<bool> g_camLogged{false};
+
 id<MTLComputePipelineState> g_copy, g_guides;
 id<MTLTexture> g_diffuse, g_specular, g_normal, g_roughness; // guide textures, input size
 id g_scaler;                                                  // id<MTLFXTemporalDenoisedScaler>
@@ -68,14 +129,11 @@ NSString* const kSource = @R"(
 using namespace metal;
 
 kernel void mfxd_copy(texture2d_array<half, access::read> a [[texture(0)]],
-                      texture2d_array<half, access::read> b [[texture(1)]],
-                      texture2d_array<half, access::write> oa [[texture(2)]],
-                      texture2d_array<half, access::write> ob [[texture(3)]],
+                      texture2d_array<half, access::write> b [[texture(1)]],
                       uint2 p [[thread_position_in_grid]])
 {
-    if (p.x >= oa.get_width() || p.y >= oa.get_height()) return;
-    oa.write(a.read(p, 0), p, 0);
-    ob.write(b.read(p, 0), p, 0);
+    if (p.x >= b.get_width() || p.y >= b.get_height()) return;
+    b.write(a.read(p, 0), p, 0);
 }
 
 kernel void mfxd_guides(texture2d_array<float, access::read> base [[texture(0)]],
@@ -135,11 +193,13 @@ std::vector<id<MTLTexture>> Pick(const Enc& e, bool written)
 
 void Close(Enc& e)
 {
-    if (e.in.size() == 2 && e.out.size() == 2) {
-        e.jobs.push_back({{e.in[0], e.in[1]}, {e.out[0], e.out[1]}});
+    if (e.in.size() == e.chain->width && e.out.size() == e.chain->width) {
+        for (size_t i = 0; i < e.in.size(); ++i) {
+            e.jobs.push_back({e.in[i], e.out[i]});
+        }
     } else if (g_logged.fetch_add(1) < 4) {
-        Logger::Warn("Denoise: RELAX instance with " + std::to_string(e.in.size()) + " inputs and " +
-                     std::to_string(e.out.size()) + " outputs; not copied");
+        Logger::Warn(std::string("Denoise: RELAX ") + e.chain->name + " with " + std::to_string(e.in.size()) +
+                     " inputs and " + std::to_string(e.out.size()) + " outputs; not copied");
     }
     e.open = false;
     e.atrous = 0;
@@ -150,6 +210,68 @@ void Close(Enc& e)
 bool Array(id<MTLTexture> t)
 {
     return t.textureType == MTLTextureType2DArray;
+}
+
+uint64_t U64(const uint8_t* p)
+{
+    uint64_t v;
+    std::memcpy(&v, p, 8);
+    return v;
+}
+
+bool IsRotation(const float* m) // column-major 4x4: three unit columns, no translation
+{
+    for (int c = 0; c < 3; ++c) {
+        const float l = m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2];
+        if (std::fabs(l - 1.0f) > 1e-3f || m[c * 4 + 3] != 0.0f) {
+            return false;
+        }
+    }
+    return std::fabs(m[15] - 1.0f) < 1e-6f;
+}
+
+// Caller holds g_mutex. Finds NRD's constant buffer through the root arguments of a RELAX dispatch (see the header).
+void ReadCamera(const Enc& e)
+{
+    id<MTLBuffer> root = e.root;
+    float w = 0, h = 0;
+    for (const auto& [r, usage] : e.uses) {
+        id<MTLTexture> t = (id<MTLTexture>)r;
+        if (t.pixelFormat == MTLPixelFormatRGBA16Float) {
+            w = t.width;
+            h = t.height;
+            break;
+        }
+    }
+    if (!root || root.storageMode == MTLStorageModePrivate || e.rootOffset + 128 > root.length || !w) {
+        return;
+    }
+    const uint8_t* args = static_cast<const uint8_t*>(root.contents) + e.rootOffset;
+    for (int i = 0; i < 16; ++i) {
+        const uint8_t* table = MetalTrace::MapGpuAddress(U64(args + 8 * i), 24 * 16);
+        for (int j = 0; table && j < 16; ++j) {
+            const uint8_t* cb = MetalTrace::MapGpuAddress(U64(table + 24 * j), 512);
+            if (!cb) {
+                continue;
+            }
+            float f[128];
+            std::memcpy(f, cb, sizeof(f));
+            if (f[124] != w || f[125] != h || !IsRotation(f + 64)) {
+                continue;
+            }
+            std::memcpy(&g_cam.worldToClip, f + 32, 64);
+            std::memcpy(&g_cam.viewToWorld, f + 64, 64);
+            std::memcpy(g_cam.delta, f + 104, 16);
+            ++g_cam.serial;
+            if (!g_camLogged.exchange(true)) {
+                char buf[200];
+                std::snprintf(buf, sizeof(buf), "Denoise: camera from NRD constants (root entry %d, descriptor %d); "
+                              "forward %.3f %.3f %.3f", i, j, f[64 + 8], f[64 + 9], f[64 + 10]);
+                Logger::Info(buf);
+            }
+            return;
+        }
+    }
 }
 
 // fx: guide textures at the G-buffer's size, written from it.
@@ -189,6 +311,15 @@ void EncodeGuides(id<MTLComputeCommandEncoder> ce)
 
 namespace Denoise {
 
+bool Supported()
+{
+    if (@available(macOS 26.0, *)) {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        return device && [MTLFXTemporalDenoisedScalerDescriptor supportsDevice:device];
+    }
+    return false;
+}
+
 bool SetMode(const std::string& mode)
 {
     const int m = mode == "off" ? Off : mode == "pass" ? Pass : mode == "fx" ? Fx : -1;
@@ -201,15 +332,53 @@ bool SetMode(const std::string& mode)
     return true;
 }
 
+bool SetCameraMode(const std::string& mode)
+{
+    const int m = mode == "game" ? CamGame : mode == "identity" ? CamIdentity : mode == "rh" ? CamRightHanded : -1;
+    if (m < 0) {
+        return false;
+    }
+    g_camMode.store(m);
+    Logger::Info("Denoise: camera matrices " + mode);
+    return true;
+}
+
+void SetWatch(bool on)
+{
+    g_watch.store(on);
+}
+
 bool Active()
 {
-    return g_mode.load(std::memory_order_relaxed) != Off;
+    return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);
+}
+
+bool Camera(float delta[4], float viewToWorld[16], uint64_t& serial)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_cam.serial) {
+        return false;
+    }
+    std::memcpy(delta, g_cam.delta, 16);
+    std::memcpy(viewToWorld, &g_cam.viewToWorld, 64);
+    serial = g_cam.serial;
+    return true;
 }
 
 void BindPipeline(id encoder, const std::string& label)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_enc[(__bridge const void*)encoder].label = label;
+}
+
+void SetRoot(id encoder, id buffer, unsigned long offset, bool offsetOnly)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Enc& e = g_enc[(__bridge const void*)encoder];
+    if (!offsetOnly) {
+        e.root = buffer;
+    }
+    e.rootOffset = offset;
 }
 
 void Use(id encoder, const void* const* resources, size_t count, unsigned long usage)
@@ -232,22 +401,31 @@ bool Dispatch(id encoder)
         return false;
     }
     Enc& e = it->second;
-    const std::string& l = e.label;
-    if (l == kHitDist || (l == kPrePass && (!e.open || e.atrous > 0))) {
+    bool drop = false;
+    const Chain* c = StartOf(e.label);
+    if (c && (!e.open || e.atrous > 0 || e.chain != c)) {
         if (e.open) {
             Close(e);
         }
-        e.open = true;
-        e.in = Pick(e, false);
-    } else if (e.open && e.atrous > 0 && l != kAtrous) {
-        Close(e);
-    }
-    if (e.open && l == kAtrous) {
+        ReadCamera(e);
+        const int mode = g_mode.load();
+        if (mode == Pass || (mode == Fx && !g_failed && NowMs() - g_scalerMs.load() < 250)) {
+            e.open = true;
+            e.chain = c;
+            e.in = Pick(e, c->keepStart);
+            drop = !c->keepStart;
+        }
+    } else if (e.open && e.label == e.chain->end) {
         ++e.atrous;
         e.out = Pick(e, true);
+        drop = true;
+    } else if (e.open && e.atrous > 0) {
+        Close(e);
+    } else {
+        drop = e.open;
     }
     e.uses.clear();
-    return e.open;
+    return drop;
 }
 
 void EndEncoding(id encoder)
@@ -275,26 +453,25 @@ void EndEncoding(id encoder)
     [ce memoryBarrierWithScope:MTLBarrierScopeTextures];
     [ce setComputePipelineState:g_copy];
     for (const Job& j : jobs) {
-        if (!Array(j.in[0]) || !Array(j.in[1]) || !Array(j.out[0]) || !Array(j.out[1])) {
+        if (!Array(j.in) || !Array(j.out)) {
             continue;
         }
-        for (NSUInteger i = 0; i < 2; ++i) {
-            [ce setTexture:j.in[i] atIndex:i];
-            [ce setTexture:j.out[i] atIndex:2 + i];
-        }
-        [ce dispatchThreads:MTLSizeMake(j.out[0].width, j.out[0].height, 1)
-            threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [ce setTexture:j.in atIndex:0];
+        [ce setTexture:j.out atIndex:1];
+        [ce dispatchThreads:MTLSizeMake(j.out.width, j.out.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     }
-    if (g_mode.load() == Fx) {
+    const uint64_t frame = g_frame.load();
+    g_passFrame.store(frame);
+    if (g_mode.load() == Fx && g_guideFrame.exchange(frame) != frame) {
         EncodeGuides(ce);
     }
     if (g_logged.fetch_add(1) == 0) {
         char buf[200];
-        std::snprintf(buf, sizeof(buf), "Denoise: RELAX pass-through, %zu instances copied (%lux%lu)", jobs.size(),
-                      (unsigned long)jobs[0].out[0].width, (unsigned long)jobs[0].out[0].height);
+        std::snprintf(buf, sizeof(buf), "Denoise: RELAX pass-through, %zu textures copied (%lux%lu)", jobs.size(),
+                      (unsigned long)jobs[0].out.width, (unsigned long)jobs[0].out.height);
         Logger::Info(buf);
     }
-    std::lock_guard<std::mutex> lock(g_mutex); // our own binds and dispatch re-created the entry
+    std::lock_guard<std::mutex> lock(g_mutex); // our own binds and dispatches re-created the entry
     g_enc.erase((__bridge const void*)encoder);
 }
 
@@ -315,7 +492,12 @@ void RenderPass(id desc)
 
 bool EncodeScaler(id scaler, id commandBuffer)
 {
-    if (g_mode.load(std::memory_order_relaxed) != Fx || g_failed || !g_diffuse) {
+    const uint64_t frame = g_frame.fetch_add(1);
+    g_scalerMs.store(NowMs());
+    // Only while RELAX is being passed through (ray traced frames) and the guides are current. The game encodes on
+    // several threads, so this frame's RELAX encoder may be encoded after this call: allow the previous frame.
+    if (g_mode.load(std::memory_order_relaxed) != Fx || g_failed || !g_diffuse || frame - g_passFrame.load() > 1 ||
+        frame - g_guideFrame.load() > 1) {
         return false;
     }
     if (@available(macOS 26.0, *)) {
@@ -360,6 +542,19 @@ bool EncodeScaler(id scaler, id commandBuffer)
                           (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat);
             Logger::Info(buf);
         }
+        simd_float4x4 worldToView = matrix_identity_float4x4, viewToClip = matrix_identity_float4x4;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_cam.serial && g_camMode.load() != CamIdentity) {
+                worldToView = simd_inverse(g_cam.viewToWorld);
+                viewToClip = simd_mul(g_cam.worldToClip, g_cam.viewToWorld);
+                if (g_camMode.load() == CamRightHanded) { // view space looking down -z
+                    const simd_float4x4 flip = simd_diagonal_matrix(simd_make_float4(1, 1, -1, 1));
+                    worldToView = simd_mul(flip, worldToView);
+                    viewToClip = simd_mul(viewToClip, flip);
+                }
+            }
+        }
         ds.colorTexture = color;
         ds.depthTexture = depth;
         ds.motionTexture = motion;
@@ -376,8 +571,8 @@ bool EncodeScaler(id scaler, id commandBuffer)
         ds.motionVectorScaleY = s.motionVectorScaleY;
         ds.depthReversed = s.isDepthReversed;
         ds.shouldResetHistory = s.reset;
-        ds.worldToViewMatrix = matrix_identity_float4x4;
-        ds.viewToClipMatrix = matrix_identity_float4x4;
+        ds.worldToViewMatrix = worldToView;
+        ds.viewToClipMatrix = viewToClip;
         [ds encodeToCommandBuffer:commandBuffer];
         return true;
     }
