@@ -36,3 +36,4 @@ docs/*.log
 # Temporary files
 .tmp/
 *.tmp
+scripts/shader_index.json
