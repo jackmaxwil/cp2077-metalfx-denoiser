@@ -17,6 +17,21 @@ frame against baselines right before and after each change, MetalFX, 779x487 ren
 | `RayTracing/Debug/SkipStaticMeshes`, `RayTracing/EnableNRD` | no change (read at load time?) | no change |
 | `RayTracing/Reference/RayNumber`, `BounceNumber` (default 0xDEADBEEF: preset decides) | no change | no change |
 
+Batch experiments (`experiments/*.txt`, plugin `cvarbatch`, `scripts/cvar_report.py`, runs
+`RED4ext/runs/20261008-105*-cvarbatch`, `-110*-cvarbatch`):
+
+- **`RayTracing/DenoisingShaderPreferenceAAPL` 1 to 0 switches NRD off**: every REBLUR, RELAX and SIGMA dispatch and
+  the unnamed passes around them disappear (frame traces `cvar0-exp` / `cvar0-base`), nothing replaces them. GPU time
+  -2.0 to -3.5 ms in RT Ultra (17-27%), -2.2 to -3.0 ms in path tracing (13-17%). NRD therefore costs 2-3.5 ms, not the
+  ~1 ms the name-based skip test could see. The still screenshots barely change (PSNR 35 dB, no-change floor 41-44)
+  because time is frozen and MetalFX's temporal accumulation converges the noise; motion shows the real quality.
+- **Valid values only.** Writing 2 to the same variable crashed the game (null dereference in render code) in both
+  modes. Only write values known to be valid (the default, 0/1 for flags) until a variable's readers are checked.
+- `RayTracing/EnableReferenceAAPLOptim`: the default 2 is the fastest path tracing option (0: +1.7 ms, 1: +1.0 ms,
+  image changes a lot).
+- No measurable effect: SHaRC bounces and downscale, multilayer resolution scale, ReSTIR GI permutation sampling, SSR
+  fallback, AO ray number, `DenoisingConcurrentDispatch`.
+
 Half resolution tracing is already the default for diffuse and reflections; the live toggles prove that writes reach
 the renderer. Path tracing's cost is elsewhere (candidates: `Editor/SHARC/Bounces` 4, `Editor/SHARC/DownscaleFactor` 5,
 `RayTracing/Multilayer/ResolutionScale` 1.0, the ReSTIR GI sample counts).

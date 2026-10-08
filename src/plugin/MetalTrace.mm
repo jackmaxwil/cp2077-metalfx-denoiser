@@ -17,6 +17,9 @@
 //   go stale; builds are never dropped); "skip raygen" drops the ray generation kernels (function names rgs_*);
 //   "skip metalfx" drops the MetalFX temporal scaler's encode; "skip off".
 //
+// - Startup settings: <plugin dir>/cvar-startup.txt ("<group>/<name>=<value>" per line) is applied at the first frame
+//   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
+//
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
 // "capture <name>", "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
@@ -880,6 +883,14 @@ void OnPresent(bool fromCommandBuffer)
         PollRequests(frame);
     }
     StepBatch(frame);
+    if (frame == 1) {
+        std::ifstream startup(s_dir.substr(0, s_dir.find_last_of('/')) + "/cvar-startup.txt");
+        for (std::string line; std::getline(startup, line);) {
+            if (!line.empty() && line[0] != '#') {
+                std::ofstream(s_dir + "/cvar.jsonl", std::ios::app) << ConfigVars::Apply(line) << '\n';
+            }
+        }
+    }
 }
 
 // --- device: pipeline creation -----------------------------------------------------------------------------------

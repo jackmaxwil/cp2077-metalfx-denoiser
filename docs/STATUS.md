@@ -30,9 +30,10 @@ What the tracing work settled:
 - **The baseline:** the upscaler option's index decides the upscaler (index 1 is MetalFX); all rtbench runs before
   2026-10-08 measured FSR3.
 
-Measured (passcost, `PIPELINE_TRACE_FINDINGS.md`): NRD is about 1 ms of an 11.3 ms RT Ultra frame; ray generation is
-4.6 ms. The swap alone is a quality change; the FPS comes from tracing less (half resolution, fewer rays) with a
-denoiser good enough to hide it.
+Measured: ray generation is 4.6 ms of an 11.3 ms RT Ultra frame (passcost); NRD is 2-3.5 ms (the engine's own
+switch `RayTracing/DenoisingShaderPreferenceAAPL=0` turns it off, `CONFIG_VARS.md`). So the swap pays: removing NRD saves
+17-27% of the RT Ultra frame, and the same switch gives `MTLFXTemporalDenoisedScaler` the noisy input it expects. The
+question is what the denoised scaler costs and how it looks in motion against NRD.
 
 ## Next steps
 
