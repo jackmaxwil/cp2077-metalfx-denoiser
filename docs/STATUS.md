@@ -33,8 +33,9 @@ What the tracing work settled:
 Measured: ray generation is 4.6 ms of an 11.3 ms RT Ultra frame (passcost); NRD and its surrounding passes are
 1-3 ms in RT Ultra and 1.7-3.7 ms in path tracing (`RayTracing/DenoisingShaderPreferenceAAPL=0` removes them, but
 also the lighting they output, `CONFIG_VARS.md`). So the swap can save 10-20% of the frame if the denoised scaler costs
-less than NRD. Its input must be the noisy lighting composited as if NRD had passed it through: NRD's debug split
-screen (`Editor/Denoising/NRD/DebugSplitScreen`) does that, being tested next.
+less than NRD. Its input must be the noisy lighting composited as if NRD had passed it through. NRD's debug split
+screen (`Editor/Denoising/NRD/DebugSplitScreen=0.5`) is reachable and its SplitScreen kernel then runs in path tracing,
+but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a usable pass-through yet.
 
 ## Next steps
 
@@ -44,8 +45,13 @@ screen (`Editor/Denoising/NRD/DebugSplitScreen`) does that, being tested next.
    toggles change RT Ultra by 1.2-1.5 ms). Next: the path tracing cost knobs (SHaRC bounces and downscale, multilayer
    resolution scale, ReSTIR GI samples), with image comparisons, not only timings.
 2. **MetalFX baseline:** rtbench with MetalFX selected, on an idle Mac, several timing windows per spot.
-3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures (descriptor
-   heap decoding, or one GPU capture read in Xcode).
+3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures. The tracer's
+   "dump" request writes MetalFX's inputs as PNGs in game, but not yet the render targets (the self-test passes; in
+   game no render pass was dumped; skip reasons are now logged). Alternatives: descriptor heap decoding, or one GPU
+   capture read in Xcode.
+3b. **NRD pass-through:** make NRD hand its noisy inputs to the composite (split screen at 1.0, or replacing the NRD
+   dispatches with copies once their input and output textures are known), so the denoised scaler gets a noisy but
+   complete image.
 4. **Prototype:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path

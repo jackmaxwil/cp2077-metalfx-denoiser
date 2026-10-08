@@ -1297,6 +1297,11 @@ void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
     const size_t bpp = BytesPerPixel(f);
     if (!bpp || t.textureType != MTLTextureType2D || t.sampleCount > 1 || t.isFramebufferOnly ||
         t.storageMode == MTLStorageModeMemoryless) {
+        char why[200];
+        std::snprintf(why, sizeof(why), "Metal trace: dump skips %s (format %lu, type %lu, samples %lu, framebufferOnly %d, "
+                      "storage %lu)", what.c_str(), (unsigned long)f, (unsigned long)t.textureType,
+                      (unsigned long)t.sampleCount, t.isFramebufferOnly ? 1 : 0, (unsigned long)t.storageMode);
+        Logger::Info(why);
         return;
     }
     const NSUInteger w = t.width, h = t.height, row = w * bpp;
@@ -1816,6 +1821,7 @@ void H_endEnc(id self, SEL sel)
     }
     ORIG(o_endEnc, V0, self)(self, sel);
     if (dumpCb) {
+        Logger::Info("Metal trace: dump render pass with " + std::to_string(dumpTargets.size()) + " targets");
         std::lock_guard<std::mutex> lock(s_capMutex);
         for (size_t i = 0; i < dumpTargets.size(); ++i) {
             DumpTexture(dumpCb, dumpTargets[i], "rt" + std::to_string(i));
