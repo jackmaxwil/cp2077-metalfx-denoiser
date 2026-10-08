@@ -18,12 +18,14 @@
 //   "skip metalfx" drops the MetalFX temporal scaler's encode; "skip off".
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>" or "skip listed|refit|raygen|metalfx|off". Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
+// "capture <name>", "skip listed|refit|raygen|metalfx|off" or "cvar <group>/<name>[=<value>]" (engine config
+// variables, ConfigVars.cpp; results appended to cvar.jsonl). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
 //
 // Built without ARC: hooks receive their arguments unretained, as the original methods do.
 
 #include "MetalTrace.hpp"
+#include "ConfigVars.hpp"
 #include "Logger.hpp"
 
 #import <Metal/Metal.h>
@@ -594,6 +596,8 @@ void PollRequests(uint64_t frame)
     if (kind == "trace" && !name.empty()) {
         s_traceName = name;
         s_traceState.store(TraceState::Armed);
+    } else if (kind == "cvar" && !name.empty()) {
+        std::ofstream(s_dir + "/cvar.jsonl", std::ios::app) << ConfigVars::Apply(name) << '\n';
     } else if (kind == "skip") {
         SetSkip(name == "listed" || name == "raygen", name == "raygen");
         s_skipRefit.store(name == "refit");

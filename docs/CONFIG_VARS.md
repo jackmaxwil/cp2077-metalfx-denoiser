@@ -1,5 +1,26 @@
 # Ray tracing and denoising settings in the macOS binary
 
+**Changing them at runtime works** (2026-10-08). RED4ext.SDK's `scripts/config_var_dump.py` extracts every config
+variable from the binary (1397; object address, group, name, type, default) and adds the ray tracing ones to the
+address DB as verified entries (`RED4ext.SDK/docs/CONFIG_VAR_AUDIT.md`). This plugin reads and writes them by name
+(`src/plugin/ConfigVars.cpp`, tracer request `cvar <group>/<name>[=<value>]`), after checking the object's name, group
+and type in memory. Note that the groups below come from string adjacency and are partly wrong (for example the Apple
+denoiser variables are in group `RayTracing`); the DB and `CONFIG_VAR_AUDIT.md` have the exact groups.
+
+First measurements (`RED4ext tools/autotest/scenarios/cvartest.reds`, `scripts/cvartest_report.py`), GPU time per
+frame against baselines right before and after each change, MetalFX, 779x487 render:
+
+| Change | RT Ultra | Path tracing |
+| --- | ---: | ---: |
+| `RayTracing/Diffuse/EnableHalfResolutionTracing` 1 to 0 (full resolution) | +1.2 ms (+10%) | +0.7 ms (+4%) |
+| `RayTracing/Reflection/EnableHalfResolutionTracing` 1 to 0 | +1.5 ms (+12%) | no change |
+| `RayTracing/Debug/SkipStaticMeshes`, `RayTracing/EnableNRD` | no change (read at load time?) | no change |
+| `RayTracing/Reference/RayNumber`, `BounceNumber` (default 0xDEADBEEF: preset decides) | no change | no change |
+
+Half resolution tracing is already the default for diffuse and reflections; the live toggles prove that writes reach
+the renderer. Path tracing's cost is elsewhere (candidates: `Editor/SHARC/Bounces` 4, `Editor/SHARC/DownscaleFactor` 5,
+`RayTracing/Multilayer/ResolutionScale` 1.0, the ReSTIR GI sample counts).
+
 Config variables of Cyberpunk 2077 2.3.1 (macOS) in the ray tracing, denoising, RTXDI, ReGIR, SHaRC and path tracing
 groups. Recovered from the binary: each registration function loads a group name string and then the names of its
 variables, so every variable is listed under the last group string loaded before it in the same function.
@@ -18,7 +39,7 @@ by photo mode).
 
 Regenerate with `scripts/config_vars.py`.
 
-**Ini files do not change these settings** (tested 2026-10-08 with RED4ext's `CP_INI`, measured with passcost):
+**Ini files do not change these settings** at runtime (tested 2026-10-08 with RED4ext's `CP_INI`, measured with passcost):
 `[RayTracing/Reference] RayNumber = 8` in `engine/config/platform/mac/zz_cp_autotest.ini` (path tracing),
 `[RayTracing/Diffuse] EnableHalfResolutionTracing` and `[Editor/Denoising/NRD] DebugSplitScreen` in
 `engine/config/platform/mac/user.ini`, and `[RayTracing/Debug] SkipStaticMeshes` plus

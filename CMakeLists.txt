@@ -53,6 +53,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/main.cpp
     src/plugin/BufferInterceptor.cpp
     src/plugin/Config.cpp
+    src/plugin/ConfigVars.cpp
     src/plugin/Logger.cpp
     src/plugin/MetalTrace.mm
 )
@@ -103,7 +104,8 @@ install(FILES ${CMAKE_SOURCE_DIR}/config/config.toml.template
 )
 
 # Tracer self-test (not installed): ./build/trace_selftest
-add_executable(trace_selftest tests/trace_selftest.mm src/plugin/MetalTrace.mm src/plugin/Logger.cpp)
+add_executable(trace_selftest tests/trace_selftest.mm tests/configvars_stub.cpp src/plugin/MetalTrace.mm
+    src/plugin/Logger.cpp)
 target_include_directories(trace_selftest PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
 target_link_libraries(trace_selftest PRIVATE
     "-framework Metal"

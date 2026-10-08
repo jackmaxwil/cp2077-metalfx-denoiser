@@ -37,9 +37,10 @@ denoiser good enough to hide it.
 ## Next steps
 
 1. **Done: frame cost by part** (passcost): ray generation 41%, NRD 9%, refits under 5%, MetalFX 1% in RT Ultra.
-1b. **Ray budget settings:** ini files do not override them (tested, `CONFIG_VARS.md`). Next: find the engine's config
-   variable registry (its set/get functions, verified in RED4ext's address DB) so a plugin can change them at runtime;
-   then measure ray generation cost and image quality per setting.
+1b. **Done: runtime access to the engine's settings** (`CONFIG_VARS.md`): 190 ray tracing variables verified in
+   RED4ext's address DB, read and written by this plugin; live changes reach the renderer (half resolution tracing
+   toggles change RT Ultra by 1.2-1.5 ms). Next: the path tracing cost knobs (SHaRC bounces and downscale, multilayer
+   resolution scale, ReSTIR GI samples), with image comparisons, not only timings.
 2. **MetalFX baseline:** rtbench with MetalFX selected, on an idle Mac, several timing windows per spot.
 3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures (descriptor
    heap decoding, or one GPU capture read in Xcode).
