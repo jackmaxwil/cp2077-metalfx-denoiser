@@ -12,6 +12,8 @@ namespace Denoise {
 bool SetMode(const std::string& mode);
 // MetalFX's temporal denoised scaler exists on this Mac (macOS 26, supported GPU).
 bool Supported();
+// Path tracing: keep RELAX's PrePass (spatial pre-blur; default) or hand the denoiser the raw signal.
+bool SetPrepass(bool on);
 // Camera matrices given to the denoised scaler: "game" (NRD's), "identity", or "rh" (NRD's, view space flipped to -z).
 bool SetCameraMode(const std::string& mode);
 // Read the camera even when off (motion tests).

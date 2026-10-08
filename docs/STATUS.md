@@ -72,7 +72,13 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
      run-to-run noise (about 1.5 dB), so the game's matrices stay.
    - Player setting: `config.toml` `[metalfx] enabled`, ModMenu page (saved choice wins), `[debug] noisy_lighting`.
      fx only passes RELAX through while the game calls its MetalFX upscaler (FSR or no upscaling keep NRD).
-   Next: RT Psycho check, a motion test with camera rotation, quality presets (denoiser at Performance by default?).
+   Next: RT Psycho check, quality presets (denoiser at Performance by default?).
+4c. **Black smears at the screen edges while turning (player report, path tracing, 3456x2160 at a low frame rate).**
+   Not reproduced by the scripted tests (`turn`: teleport-driven turns and flicks at 1168x730, mid-turn "shot"
+   captures; the motion trigger and frozen-time teleports made frame-exact captures unreliable). Likely cause: at low
+   frame rates each frame uncovers a wide band at the edge whose raw path traced signal is nearly black, and the stock
+   denoiser hides it with RELAX's PrePass and HistoryFix. Path tracing now keeps RELAX's PrePass by default
+   (`denoiseprepass on|off`), as RT Ultra already did. Waiting for the player's check.
 4a. **Original plan:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path

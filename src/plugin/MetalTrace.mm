@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh" (Denoise.mm), "motion <name>" (see MotionTick), "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -467,6 +467,7 @@ std::string s_traceName;
 std::string s_dumpName;
 std::atomic<int> s_motion{0}; // "motion" (MotionTick): 0 idle, 1 armed, 2 moving, 3 settling
 std::string s_motionName;
+std::string s_shotName; // "shot <name>": the upscaler output of the next frame, as <name>-..-shot (guarded by s_capMutex)
 std::atomic<uint64_t> s_frame{0};
 std::atomic<bool> s_sawCbPresent{false};
 
@@ -821,10 +822,15 @@ void PollRequests(uint64_t frame)
         if (!Denoise::SetMode(name)) {
             Logger::Warn("Metal trace: unknown denoise mode " + name);
         }
+    } else if (kind == "denoiseprepass") {
+        Denoise::SetPrepass(name == "on");
     } else if (kind == "denoisecam") {
         if (!Denoise::SetCameraMode(name)) {
             Logger::Warn("Metal trace: unknown camera mode " + name);
         }
+    } else if (kind == "shot" && !name.empty()) {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        s_shotName = name;
     } else if (kind == "motion" && !name.empty()) {
         Denoise::SetWatch(true);
         std::lock_guard<std::mutex> lock(s_capMutex);
@@ -2209,27 +2215,33 @@ std::string FxTex(const char* key, id<MTLTexture> t)
     return ",\"" + std::string(key) + "\":" + P((__bridge const void*)t);
 }
 
-// "motion <name>": waits for the camera to move (NRD's camera, Denoise::Camera), then writes the upscaler output of the
-// first frame after it stops (<name>-..-still0) and of the frame 90 frames later (<name>-..-still90). Their difference
-// is what motion left behind (ghosting, lag, disocclusion noise); scripts/motion_report.py compares them.
-int s_motionFrames = 0;
+// "motion <name>": waits for the camera to move (NRD's camera, Denoise::Camera), then writes the upscaler output 3, 6,
+// 10 and 20 frames after the motion started (<name>-..-move3 ...), once the camera has been still for 15 frames (still15; scripted
+// motion can pause a frame or two between steps) and 90 frames after that (still90). still15 against still90 is what
+// motion left behind (ghosting, lag, disocclusion noise); scripts/motion_report.py compares them. History resets the
+// game asks for while moving are counted.
+int s_motionFrames = 0, s_motionStill = 0, s_motionResets = 0;
 uint64_t s_motionSerial = 0;
 float s_motionView[16];
 
-void MotionTick(id cb, id<MTLTexture> output)
+void MotionTick(id cb, id<MTLTexture> output, bool reset)
 {
+    if (reset && s_motion.load() == 2) {
+        ++s_motionResets;
+    }
     float delta[4], view[16];
     uint64_t serial = 0;
     if (!Denoise::Camera(delta, view, serial) || serial == s_motionSerial) {
         return;
     }
-    float change = std::fabs(delta[0]) + std::fabs(delta[1]) + std::fabs(delta[2]);
+    float turn = 0;
     for (int i = 0; i < 16; ++i) {
-        change += std::fabs(view[i] - s_motionView[i]);
+        turn += std::fabs(view[i] - s_motionView[i]);
     }
     s_motionSerial = serial;
     std::memcpy(s_motionView, view, sizeof(view));
-    const bool moving = change > 1e-5f;
+    // Thresholds above the camera's idle jitter: 1 mm of movement, about 0.01 degrees of rotation per frame.
+    const bool moving = std::fabs(delta[0]) + std::fabs(delta[1]) + std::fabs(delta[2]) > 1e-3f || turn > 2e-4f;
     std::lock_guard<std::mutex> lock(s_capMutex);
     const std::string keep = s_dumpName;
     s_dumpName = s_motionName;
@@ -2237,12 +2249,19 @@ void MotionTick(id cb, id<MTLTexture> output)
     case 1:
         if (moving) {
             s_motion.store(2);
+            s_motionFrames = 0;
+            s_motionResets = 0;
             Logger::Info("Metal trace: motion " + s_motionName + " moving");
         }
         break;
     case 2:
-        if (!moving) {
-            DumpTexture(cb, output, "still0");
+        ++s_motionFrames;
+        if (s_motionFrames == 3 || s_motionFrames == 6 || s_motionFrames == 10 || s_motionFrames == 20) {
+            DumpTexture(cb, output, "move" + std::to_string(s_motionFrames));
+        }
+        s_motionStill = moving ? 0 : s_motionStill + 1;
+        if (s_motionStill == 15 && s_motionFrames > 20) {
+            DumpTexture(cb, output, "still15");
             s_motionFrames = 0;
             s_motion.store(3);
         }
@@ -2251,7 +2270,8 @@ void MotionTick(id cb, id<MTLTexture> output)
         if (++s_motionFrames == 90) {
             DumpTexture(cb, output, "still90");
             s_motion.store(0);
-            Logger::Info("Metal trace: motion " + s_motionName + " done");
+            Logger::Info("Metal trace: motion " + s_motionName + " done (" + std::to_string(s_motionResets) +
+                         " history resets while moving)");
         }
         break;
     }
@@ -2290,8 +2310,18 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
     if (!(Denoise::Active() && Denoise::EncodeScaler(self, cb))) {
         ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
     }
+    {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        if (!s_shotName.empty()) {
+            const std::string keep = s_dumpName;
+            s_dumpName = s_shotName;
+            DumpTexture(cb, [(id<MTLFXTemporalScaler>)self outputTexture], "shot");
+            s_dumpName = keep;
+            s_shotName.clear();
+        }
+    }
     if (s_motion.load(std::memory_order_relaxed)) {
-        MotionTick(cb, [(id<MTLFXTemporalScaler>)self outputTexture]);
+        MotionTick(cb, [(id<MTLFXTemporalScaler>)self outputTexture], [(id<MTLFXTemporalScaler>)self reset]);
     }
     if (s_dump.load()) {
         id<MTLFXTemporalScaler> sc = self;

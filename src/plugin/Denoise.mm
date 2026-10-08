@@ -10,7 +10,8 @@
 // nothing happens where they are not seen, so raster frames are untouched):
 // - Path tracing, one serial encoder, two instances: HitDistReconstruction (2684890295, first instance only) or PrePass
 //   (1624964913) reads the two noisy RGBA16Float radiance textures (diffuse, specular); four a-trous iterations
-//   (1807644384) follow, the last writing both outputs. Everything from the first pass to the last iteration is dropped.
+//   (1807644384) follow, the last writing both outputs. By default the passes up to PrePass keep running and PrePass's
+//   two outputs are copied (see g_ptPrepass); otherwise everything is dropped and the noisy inputs are copied.
 // - RT Ultra/Psycho, one encoder each for diffuse and specular: the PrePass (2146613912 diffuse, 2571244900 specular)
 //   resolves the half width checkerboard into one RGBA16Float texture and keeps running; everything after it up to the
 //   last a-trous iteration (1741889550 diffuse, 3863891985 specular), which writes the output, is dropped.
@@ -56,19 +57,27 @@ std::atomic<int> g_camMode{CamGame};
 struct Chain {
     const char* name;
     const char* start[2];
-    bool keepStart; // the first pass keeps running; its RGBA16Float output is the copy source
+    const char* keep; // this pass (and those before it) keep running; its RGBA16Float output is the copy source
     const char* end;
-    size_t width;   // textures per instance
+    size_t width;     // textures per instance
 };
+// Path tracing keeps its PrePass when g_ptPrepass is set (the default): its light spatial pre-blur fills the
+// disoccluded bands at the screen edges that fast camera turns at low frame rates uncover, which the raw signal
+// shows nearly black until the denoiser's history builds up.
+std::atomic<bool> g_ptPrepass{true};
 const Chain kChains[] = {
-    {"path tracing", {"2684890295", "1624964913"}, false, "1807644384", 2},
-    {"diffuse", {"2146613912", nullptr}, true, "1741889550", 1},
-    {"specular", {"2571244900", nullptr}, true, "3863891985", 1},
+    {"path tracing", {"2684890295", "1624964913"}, nullptr, "1807644384", 2},
+    {"path tracing", {"2684890295", "1624964913"}, "1624964913", "1807644384", 2},
+    {"diffuse", {"2146613912", nullptr}, "2146613912", "1741889550", 1},
+    {"specular", {"2571244900", nullptr}, "2571244900", "3863891985", 1},
 };
 
 const Chain* StartOf(const std::string& label)
 {
     for (const Chain& c : kChains) {
+        if (&c == &kChains[0] ? g_ptPrepass.load() : &c == &kChains[1] ? !g_ptPrepass.load() : false) {
+            continue;
+        }
         for (const char* s : c.start) {
             if (s && label == s) {
                 return &c;
@@ -90,6 +99,7 @@ struct Enc {
     const Chain* chain = nullptr;
     bool open = false;
     int atrous = 0;
+    bool kept = false; // the chain's keep pass has run
     std::vector<id<MTLTexture>> in, out;
     std::vector<Job> jobs;
 };
@@ -203,6 +213,7 @@ void Close(Enc& e)
     }
     e.open = false;
     e.atrous = 0;
+    e.kept = false;
     e.in.clear();
     e.out.clear();
 }
@@ -332,6 +343,13 @@ bool SetMode(const std::string& mode)
     return true;
 }
 
+bool SetPrepass(bool on)
+{
+    g_ptPrepass.store(on);
+    Logger::Info(std::string("Denoise: path tracing PrePass ") + (on ? "kept" : "dropped"));
+    return true;
+}
+
 bool SetCameraMode(const std::string& mode)
 {
     const int m = mode == "game" ? CamGame : mode == "identity" ? CamIdentity : mode == "rh" ? CamRightHanded : -1;
@@ -412,8 +430,18 @@ bool Dispatch(id encoder)
         if (mode == Pass || (mode == Fx && !g_failed && NowMs() - g_scalerMs.load() < 250)) {
             e.open = true;
             e.chain = c;
-            e.in = Pick(e, c->keepStart);
-            drop = !c->keepStart;
+            if (!c->keep) {
+                e.in = Pick(e, false); // the noisy inputs
+                drop = true;
+            } else if (e.label == c->keep) {
+                e.in = Pick(e, true); // the keep pass's output
+                e.kept = true;
+            }
+        }
+    } else if (e.open && e.chain->keep && !e.kept) {
+        if (e.label == e.chain->keep) {
+            e.in = Pick(e, true);
+            e.kept = true;
         }
     } else if (e.open && e.label == e.chain->end) {
         ++e.atrous;
@@ -496,10 +524,21 @@ bool EncodeScaler(id scaler, id commandBuffer)
     g_scalerMs.store(NowMs());
     // Only while RELAX is being passed through (ray traced frames) and the guides are current. The game encodes on
     // several threads, so this frame's RELAX encoder may be encoded after this call: allow the previous frame.
-    if (g_mode.load(std::memory_order_relaxed) != Fx || g_failed || !g_diffuse || frame - g_passFrame.load() > 1 ||
-        frame - g_guideFrame.load() > 1) {
+    if (g_mode.load(std::memory_order_relaxed) != Fx || g_failed || !g_diffuse) {
         return false;
     }
+    static std::atomic<uint64_t> denoised{0}, fallbacks{0};
+    if ((frame & 1023) == 0 && denoised.load()) {
+        Logger::Info("Denoise: last frames: " + std::to_string(denoised.exchange(0)) + " denoised, " +
+                     std::to_string(fallbacks.exchange(0)) + " game scaler while RELAX was passed through");
+    }
+    if (frame - g_passFrame.load() > 1 || frame - g_guideFrame.load() > 1) {
+        if (frame - g_passFrame.load() < 8) {
+            fallbacks.fetch_add(1); // ray traced frame without this frame's pass-through or guides
+        }
+        return false;
+    }
+    denoised.fetch_add(1);
     if (@available(macOS 26.0, *)) {
         id<MTLFXTemporalScaler> s = scaler;
         id<MTLTexture> color = s.colorTexture, depth = s.depthTexture, motion = s.motionTexture,

@@ -205,6 +205,11 @@ int main()
                                                                                      options:MTLPipelineOptionNone
                                                                                   reflection:nil
                                                                                        error:&err];
+            pd.label = @"1624964913";
+            id<MTLComputePipelineState> prePass = [dev newComputePipelineStateWithDescriptor:pd
+                                                                                     options:MTLPipelineOptionNone
+                                                                                  reflection:nil
+                                                                                       error:&err];
             pd.label = @"1807644384";
             id<MTLComputePipelineState> atrous = [dev newComputePipelineStateWithDescriptor:pd
                                                                                     options:MTLPipelineOptionNone
@@ -224,7 +229,9 @@ int main()
                 [t[i] replaceRegion:MTLRegionMake2D(0, 0, 8, 4) mipmapLevel:0 slice:0 withBytes:px.data()
                         bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4];
             }
+            // Raw inputs (PrePass dropped): HitDistReconstruction's two reads are copied.
             Denoise::SetMode("pass");
+            Denoise::SetPrepass(false);
             id<MTLCommandBuffer> cb = [queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc useResources:t count:2 usage:MTLResourceUsageRead];
@@ -236,6 +243,7 @@ int main()
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
+            Denoise::SetPrepass(true);
             Denoise::SetMode("off");
             __fp16 o[2][4];
             for (int i = 0; i < 2; ++i) {
@@ -247,6 +255,40 @@ int main()
             if ((float)o[0][0] != want0 || (float)o[1][0] != 3 - want0 || (float)o[0][3] != want0) {
                 std::fprintf(stderr, "denoise outputs %.1f %.1f\n", (float)o[0][0], (float)o[1][0]);
                 return Fail("denoise pass-through did not copy the inputs");
+            }
+
+            // PrePass kept (the default): its two written textures are copied. The kept dispatches run the self-test
+            // kernel, so they get real textures to work on.
+            for (int i = 0; i < 4; ++i) {
+                std::vector<__fp16> px(8 * 4 * 4, (__fp16)(i < 2 ? 5 + i : 0));
+                [t[i] replaceRegion:MTLRegionMake2D(0, 0, 8, 4) mipmapLevel:0 slice:0 withBytes:px.data()
+                        bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4];
+            }
+            Denoise::SetMode("pass");
+            cb = [queue commandBuffer];
+            enc = [cb computeCommandEncoder];
+            [enc setTexture:in atIndex:0];
+            [enc setTexture:out atIndex:1];
+            [enc setComputePipelineState:hitDist];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 4, 1)];
+            [enc useResources:t count:2 usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+            [enc setComputePipelineState:prePass];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 4, 1)];
+            [enc useResources:t + 2 count:2 usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+            [enc setComputePipelineState:atrous];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 4, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            Denoise::SetMode("off");
+            for (int i = 0; i < 2; ++i) {
+                [t[2 + i] getBytes:o[i] bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4
+                         fromRegion:MTLRegionMake2D(7, 3, 1, 1) mipmapLevel:0 slice:0];
+            }
+            const float want5 = (lowFirst == outLowFirst) ? 5 : 6;
+            if ((float)o[0][0] != want5 || (float)o[1][0] != 11 - want5) {
+                std::fprintf(stderr, "denoise prepass outputs %.1f %.1f\n", (float)o[0][0], (float)o[1][0]);
+                return Fail("denoise pass-through did not copy the PrePass outputs");
             }
         }
         std::printf("PASS trace_selftest (%zu trace bytes)\n%s", trace.size(), perf.c_str());
