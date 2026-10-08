@@ -1,175 +1,79 @@
-# Pipeline Trace Findings (macOS Cyberpunk 2077)
+# Renderer findings (macOS Cyberpunk 2077 2.3.1)
 
-This document captures the key learnings from the Metal pipeline tracing work used to locate the *actual* denoiser path in the macOS build (where NRD CPU entrypoints never execute).
+Measured with the plugin's native Metal tracer (`src/plugin/MetalTrace.mm`) and RED4ext's `tools/rtbench`, on an
+M4 Max (macOS 26.7) in a 1168x730 window. Raw runs live in `RED4ext/runs/<timestamp>-rtbench/` (frame traces,
+frame timings, screenshots, `rtbench.md`).
 
-## Executive summary
+## How the renderer is built
 
-- **NRD/RELAX/REBLUR/SIGMA CPU entrypoints are not on the hot path** on macOS (hooks never fire even with RT Psycho / Path Tracing).
-- The denoiser work is happening inside **Metal compute pipelines**.
-- Pipeline/function names are unreliable (often garbage/NULL when attaching late), so the denoiser must be identified via **resource-binding signatures**.
-- A small set of compute PSOs have denoiser-like binding patterns (many textures, ping-pong history buffers, motion/depth, masks).
-- We can reliably focus tracing using a **PSO allowlist filter**, which makes high-frequency dispatch tracing feasible.
+- **Shaders are converted HLSL.** Every game compute kernel is `cs_main_`, every vertex/fragment function
+  `vs_main_`/`ps_main_`, with the binding layout of Apple's Metal Shader Converter: `top_level_global_ab` (root
+  signature, buffer 2), `res_desc_heap_ab` (resource descriptor heap, buffer 0), `smp_desc_heap_ab` (samplers,
+  buffer 1). Resources are bindless: kernels read and write textures through the descriptor heap, not through
+  `setTexture:atIndex:`. Encoders declare them with `useResource:usage:` (traced as residency, read/write) and
+  `useHeap:`.
+- **Pipelines carry a stable numeric label** (for example `3496549227`), set by the engine. It is the best key for a
+  pass across runs. Its derivation is unknown (not a common hash of the shader name).
+- **Ray tracing pipelines keep their names:** ray generation kernels are named `rgs_shadow_main`,
+  `rgs_shadow_transparent_main`, `rgs_diffuse_main`, `rgs_importance_main`, `rgs_reflection_opaque_main`,
+  `rgs_reflection_transparent_main`, `rgs_reference_main` (path tracing),
+  `rgs_restirgi_spatiotemporal_epilogue` (path tracing).
+- **Shader libraries come from the game's caches** (`engine/shadermetal_final.cache`,
+  `engine/staticshadermetal_final.cache`); `scripts/shader_index.py` maps each library the game creates to its cache
+  entry. The static cache has a name table (REBLUR_*, RELAX_*, SIGMA_*, m_rtxdi*, m_rayTracedReference_*, ...), but its
+  layout is only partly decoded: names from it are tentative (shown as `~name`), and some are wrong (path tracing names
+  appear in raster frames).
+- **The NRD CPU entry points are not the integration point.** The REBLUR/RELAX/SIGMA work runs as converted compute
+  kernels dispatched by the engine.
 
-## What was measured
+## Frame cost (rtbench, 2026-10-07)
 
-An earlier, now retired, out-of-process tracing setup replaced Objective-C method implementations (IMP replacement,
-which was stable where hooking `objc_msgSend` was not) on the compute command encoder and recorded:
+GPU time per frame at 779x487 render resolution (1168x730 output), steady windows only:
 
-- `setComputePipelineState:`
-- `setTexture:atIndex:`
-- `setBuffer:offset:atIndex:`
-- `setBytes:length:atIndex:`
-- `dispatchThreadgroups:threadsPerThreadgroup:` / `dispatchThreads:threadsPerThreadgroup:`
+| Mode | GPU ms (median) |
+| --- | ---: |
+| Raster | 5.5-6.3 |
+| RT Ultra | 11-15 |
+| RT Psycho | 13-16 |
+| Path tracing | 19-31 |
 
-Each dispatch was logged with its texture/buffer/bytes bindings, and each texture with `w/h/pf/usage/storageMode`.
-A PSO allowlist cut the noise and overhead enough for per-dispatch tracing. Runs were logged to `runs/<timestamp>/`.
-The same measurements are being rebuilt natively in the plugin (`src/plugin/MetalTrace.mm`).
+About half of the 180-frame windows were not steady: medians of 45-140 ms in every mode, and p99 of 150-400 ms almost
+everywhere. Causes seen: areas still streaming after a teleport, and other apps in use on the same GPU during the runs.
+Next: several windows per spot (report the best and the worst), runs on an otherwise idle Mac.
 
-## Key PSO allowlist (current)
+## Ray tracing workload (spot 0, RT Ultra)
 
-Derived empirically by selecting PSOs with high texture/buffer/bytes binding counts.
+- Acceleration structures per frame: 312 BLAS refits, 36 BLAS builds, 2 TLAS builds (`MTLPrimitive` /
+  `MTLInstanceAccelerationStructureDescriptor`).
+- 406 compute dispatches per frame (raster: ~210); 53 compute pipelines run only with ray tracing, 81 only with path
+  tracing (rtbench report: "Compute pipelines in <mode> but not raster").
+- Ray generation passes write 779x487 (render resolution) targets: RGBA16Float, RG16Float, R16Float, R32Uint, RG8Unorm.
+- Path tracing is a wavefront tracer: `rgs_reference_wavefront_trace`, `rgs_reference_wavefront_shade`,
+  `rgs_reference_wavefront_lightid_prefetch`, plus `rgs_reference_main` and the ReSTIR GI epilogue
+  (`rgs_restirgi_spatiotemporal_epilogue`); 485 dispatches and 357 acceleration structure operations per frame.
 
-```
-0xa0f0ae100,0xa0f0ad800,0xa0f0af900,0xa0f0ade00,0xa0f0ad500,0xa0f0ad200,0xa0d74b300
-```
+## G-buffer and upscaler inputs (render resolution 779x487, output 1168x730)
 
-## Texture metadata decoding
+- G-buffer pass: two BGR10A2Unorm targets, one RGBA8Unorm, one RGBA16Float, depth Depth32Float_Stencil8. Which target
+  holds normals, base color, roughness and metalness is not mapped yet.
+- MetalFX temporal scaler, when the game uses it: color RGBA16Float, depth Depth32Float_Stencil8 (reversed Z), motion
+  RG16Float in UV units (motion vector scale = input size), jitter in pixels, no exposure texture, pre-exposure 1.
+- The upscaler option is not what its label says: with the user's setting "FSR2" the game creates and calls the MetalFX
+  temporal scaler (internal kernels `brnetv3_*`); with "MetalFX" set in UserSettings.json before launch it does not.
+  To be resolved before benchmarking upscalers.
 
-Even when full ObjC bindings are “not available”, we can query texture properties via selector calls using `objc_msgSend`:
+## Corrections to earlier notes
 
-- `-[MTLTexture width]`, `-[MTLTexture height]`
-- `-[MTLTexture pixelFormat]`
-- `-[MTLTexture usage]`
-- `-[MTLTexture storageMode]`
+- The "denoiser candidate" pipelines of the retired tracer (2024x847 motion and depth, 1720x720 history, 3440x1440
+  output) were MetalFX's own temporal upscaler kernels, not the game's denoiser.
+- Pixel format numbers were mislabeled: 13 is R8Uint, 23 R16Uint, 30 RG8Unorm (not R8Unorm / RGB10A2), 62 RG16Snorm,
+  94 BGR10A2Unorm.
 
-This produces stable `texture_info` events and allows identifying motion/depth/history/mask buffers via format + resolution.
+## Open
 
-### Observed resolution tiers (3440×1440 capture)
-
-- **3440×1440**: full resolution
-- **2024×847**: internal aspect-correct intermediate
-- **1720×720**: half resolution (exact 0.5× scale)
-- **860×360**: quarter resolution
-
-### Observed pixelFormat values (from live captures)
-
-These are values as returned by `-[MTLTexture pixelFormat]`.
-
-- `pf=115`: RGBA16Float (HDR-ish color)
-- `pf=65`: RG16Float (motion vectors)
-- `pf=25`: R16Float (depth/scalar)
-- `pf=13`: R8Unorm (masks)
-- `pf=70`: RGBA8Unorm (LDR / utility)
-- `pf=30`: RGB10A2Unorm (10-bit HDR)
-
-## Denoiser-candidate PSOs and signatures
-
-### Primary candidate: `PSO 0xa0f0ae100`
-
-This pipeline looks like a “main denoiser” stage based on inputs + history ping-pong + masks.
-
-Representative bindings (from `runs/20260105-210313`):
-
-- Full-res color-like inputs (RGBA16F):
-  - `t1`, `t3`, `t4` → **3440×1440 pf=115**
-- Motion vectors:
-  - `t7` → **2024×847 pf=65**
-- Depth/scalar:
-  - `t5` → **2024×847 pf=25**
-- Full-res masks (ping-pong):
-  - `t8`, `t9` → **3440×1440 pf=13** (2 pointers alternating)
-- Half-res history / temporal buffers (ping-pong):
-  - `t15`, `t16` → **1720×720 pf=25** (alternating)
-- Additional half-res outputs:
-  - `t12` → **1720×720 pf=30**
-  - `t13`, `t14` → **1720×720 pf=115**
-- Quarter-res utility:
-  - `t11` → **860×360 pf=70**
-
-### Secondary candidate: `PSO 0xa0f0ad800`
-
-Also strongly denoiser-like (high binding counts, multiple ping-pong pairs at half-res):
-
-- Full-res color-like textures: `t1`, `t3` (3440×1440 pf=115)
-- Motion vectors: `t2` (2024×847 pf=65)
-- Multiple half-res ping-pong pairs:
-  - `t4..t7` (1720×720 pf=25 alternating)
-  - `t12..t14` (1720×720 pf=25/pf=23 alternating)
-- Half-res HDR intermediates: `t15`, `t16` (1720×720 pf=115)
-
-### Temporal stage candidate: `PSO 0xa0f0af900`
-
-This looks like a half-res temporal/history stage:
-
-- Inputs: motion + depth (`t0` pf=65, `t1` pf=25 at 2024×847)
-- Multiple half-res ping-pong pairs at `t2..t6` (1720×720 pf=25/pf=23 alternating)
-
-## Recommended next steps (to finish RT performance optimization)
-
-### 1) Confirm output role per PSO (read vs write)
-
-Goal: identify which slot(s) are the “final” denoised output for each candidate PSO.
-
-- Add/extend tracing to infer outputs:
-  - Track ping-pong pairs and correlate with subsequent passes.
-  - Preferably also capture `setTexture:atIndex:` *and* `useResource(s):usage:` / `memoryBarrierWithResources:` if available to infer write targets.
-
-Deliverable: a stable mapping like:
-
-| PSO | output slot(s) | history slot(s) | motion slot | depth slot |
-|---|---|---|---|---|
-
-### 2) Replace-by-PSO (prototype “skip & measure”)
-
-Before implementing MetalFX replacement, validate each candidate PSO’s contribution:
-
-- Add an experimental mode: **skip dispatches** for a single PSO (or reduce dispatch count) and measure:
-  - FPS change
-  - image artifact type
-  - whether RT noise reappears
-
-This quickly confirms which PSO is the true denoiser bottleneck.
-
-### 3) Integrate MetalFX replacement at the Metal compute level (not NRD CPU)
-
-Given macOS doesn’t call NRD CPU entrypoints, the replacement should hook at Metal compute dispatch time:
-
-- For the identified denoiser PSO(s):
-  - Collect the required textures (color, motion, depth, history, exposure/masks if used).
-  - Run MetalFX Temporal Scaler (or your denoiser compute path) to produce the expected output(s).
-  - Route outputs back into the same texture(s) the game expects.
-  - Then either:
-    - skip the original dispatch, or
-    - allow it but overwrite its output (worse perf).
-
-### 4) Lock down slot-to-semantic mapping and make it configuration-driven
-
-Once the slot mapping is stable:
-
-- Add a config section keyed by PSO pointer:
-  - which `t#` is input/output/motion/depth/history
-  - motion vector space (NDC vs pixels, Y-flip)
-  - resolution scale assumptions
-
-This will make the mod resilient across patches where PSO pointers may change.
-
-### 5) Performance hardening
-
-- Keep PSO allowlist enabled by default when tracing.
-- Disable all event emission by default; sample only when requested.
-- Keep all hot-path work in the native plugin (Objective-C++/C++); the replacement hook lives there.
-
-### 6) Final validation workflow
-
-- A/B compare (replacement toggled via config):
-  - baseline vs replacement
-  - per-feature (GI/shadows/reflections) scenarios
-- Record:
-  - FPS, GPU timing, fallback counters
-  - screenshot diffs at fixed camera positions
-
-## Reference runs
-
-- `runs/20260105-210144`: allowlist filter verified (only 7 PSOs emitting)
-- `runs/20260105-210313`: texture metadata + binding signatures (26 textures)
-- `runs/20260105-210752`: texture_info includes usage/storageMode
+- Decode the top-level argument buffer per dispatch (root signature to descriptor heap indices) to name each
+  dispatch's exact textures; this is what maps NRD's inputs (normal/roughness, view Z, motion, hit distance) and
+  outputs.
+- Finish the static cache name table so passes get reliable names.
+- Settings changed at runtime (UserSettings) read back as changed but do not switch the ray tracing renderer; rtbench
+  therefore sets each mode before launch.

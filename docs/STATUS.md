@@ -6,32 +6,21 @@
 
 ## What works
 
-- The plugin builds, loads under RED4ext, reads `config.toml`, and creates a MetalFX context.
-- `[debug] trace_metal_compute = true` swizzles the driver's compute encoder `setComputePipelineState:` and logs each
-  distinct compute pipeline state (pointer, label, thread execution width). Default off.
-- `framework/`: MetalFX temporal scaler wrapper, per-feature scaler pool, motion vector / depth conversion.
+- The plugin builds, loads under RED4ext, reads `config.toml`, and creates a MetalFX context. It changes nothing in
+  rendering.
+- Native Metal tracer (`METALFX_TRACE=1` or `[debug] trace_metal_compute = true`): pipeline names and reflection,
+  one-frame traces, GPU frame timings, one-frame GPU captures (`MTL_CAPTURE_ENABLED=1`). Checked by
+  `build/trace_selftest` and in game.
+- RED4ext `tools/rtbench`: raster, RT Ultra, RT Psycho and path tracing at 5 spots, in the background. Findings and
+  numbers: `PIPELINE_TRACE_FINDINGS.md`. Settings: `CONFIG_VARS.md`.
 
-## What does not
+## Next steps
 
-- No denoiser is replaced. Nothing is hooked by default.
-- The NRD CPU entry points (REBLUR, SIGMA, NrdInputs) never execute on macOS, and none has a verified entry in the
-  RED4ext address DB. The old 2.21 offsets in `docs/ADDRESSES.md` and `docs/nrd_addresses.json` are research notes only.
-- `BufferInterceptor`'s wrapper offsets (`docs/BUFFER_LAYOUT.md`) were written for the NRD CPU path and are unvalidated.
-
-## Native next steps
-
-1. **Bindings trace.** Extend `MetalTrace` to the other compute encoder methods (`setTexture:atIndex:`,
-   `setBuffer:offset:atIndex:`, `setBytes:length:atIndex:`, `dispatchThreadgroups:...`, `dispatchThreads:...`) and log
-   a per-PSO binding signature (slot, size, pixel format), gated by a PSO allowlist.
-2. **Identify denoiser PSOs by signature**, not by pointer or label (both change per run). Match the signatures in
-   `docs/PIPELINE_TRACE_FINDINGS.md`: full-res RGBA16F color, RG16F motion, R16F depth, R8 mask and half-res
-   ping-pong history.
-3. **Skip and measure.** Optionally drop the dispatches of one candidate PSO and measure FPS and image change to
-   confirm which PSO is the denoiser.
-4. **Map slots** to color / motion / depth / history / output for the confirmed PSOs.
-5. **Substitute MetalFX** at dispatch time: encode `MetalFX_Denoise` into the game's command buffer for the mapped
-   textures, then skip the original dispatch.
-6. **Validate** in game through RED4ext's `tools/cp-run`: FPS, GPU time, screenshots at fixed positions.
-
-C++ game functions, if any are needed, are hooked through `aSdk->hooking->Attach` only after their addresses are
-verified in the RED4ext address DB.
+1. Steadier measurements: several timing windows per spot; idle Mac.
+2. Decode each dispatch's top-level argument buffer (root signature to descriptor heap) to name every texture a pass
+   reads and writes; map the G-buffer targets (normals, base color, roughness) and NRD's inputs and outputs.
+3. Finish the static shader cache's name table (reliable pass names).
+4. Find which upscaler option selects MetalFX on macOS (the labels do not match what the game creates).
+5. Test the hidden settings (`CONFIG_VARS.md`) through an ini override; measure each with rtbench.
+6. Replace NRD plus the MetalFX temporal scaler with `MTLFXTemporalDenoisedScaler` (macOS 26) and compare with
+   rtbench.
