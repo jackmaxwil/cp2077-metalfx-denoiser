@@ -8,7 +8,7 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
 # macOS specific settings
 set(CMAKE_OSX_ARCHITECTURES "arm64")
-set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0")
 
 # Output directory
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -57,7 +57,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/MetalTrace.mm
 )
 
-set_source_files_properties(src/plugin/MetalTrace.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+# MetalTrace.mm is built without ARC: its hooks take their arguments unretained, like the methods they replace.
 
 target_include_directories(MetalFXDenoiser PRIVATE
     ${CMAKE_SOURCE_DIR}/src/plugin
@@ -72,6 +72,8 @@ target_include_directories(MetalFXDenoiser PRIVATE
 target_link_libraries(MetalFXDenoiser PRIVATE
     MetalFXDenoiserCore
     "-framework Metal"
+    "-framework MetalFX"
+    "-framework QuartzCore"
     "-framework Foundation"
 )
 
@@ -98,4 +100,14 @@ install(FILES ${CMAKE_SOURCE_DIR}/config/config.toml.template
     DESTINATION red4ext/plugins/MetalFXDenoiser
     RENAME config.toml
     OPTIONAL
+)
+
+# Tracer self-test (not installed): ./build/trace_selftest
+add_executable(trace_selftest tests/trace_selftest.mm src/plugin/MetalTrace.mm src/plugin/Logger.cpp)
+target_include_directories(trace_selftest PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+target_link_libraries(trace_selftest PRIVATE
+    "-framework Metal"
+    "-framework MetalFX"
+    "-framework QuartzCore"
+    "-framework Foundation"
 )
