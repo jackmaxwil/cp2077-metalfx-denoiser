@@ -107,8 +107,45 @@ int main()
         }
         sleep(3);
 
+        // Dump: a frame with a two-target render pass (RGBA8 cleared to red, BGR10A2 to green).
+        MTLTextureDescriptor* rtd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:32
+                                                                                     height:16
+                                                                                  mipmapped:NO];
+        rtd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        id<MTLTexture> rt0 = [dev newTextureWithDescriptor:rtd];
+        rtd.pixelFormat = MTLPixelFormatBGR10A2Unorm;
+        id<MTLTexture> rt1 = [dev newTextureWithDescriptor:rtd];
+        std::ofstream(dir + "/req-3") << "dump selftestdump\n";
+        for (int frame = 0; frame < 20; ++frame) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = rt0;
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[1].texture = rt1;
+                rp.colorAttachments[1].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[1].clearColor = MTLClearColorMake(0, 1, 0, 1);
+                rp.colorAttachments[1].storeAction = MTLStoreActionStore;
+                [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+                id<CAMetalDrawable> drawable = [layer nextDrawable];
+                if (drawable) {
+                    [cb presentDrawable:drawable];
+                }
+                [cb commit];
+                [cb waitUntilCompleted];
+            }
+        }
+        sleep(1);
+        if (access((dir + "/selftestdump-00-rt0-32x16-RGBA8Unorm.png").c_str(), F_OK) != 0 ||
+            access((dir + "/selftestdump-01-rt1-32x16-BGR10A2Unorm.png").c_str(), F_OK) != 0) {
+            return Fail("dump PNGs missing");
+        }
+
         if (getenv("MTL_CAPTURE_ENABLED")) {
-            std::ofstream(dir + "/req-3") << "capture selftest\n";
+            std::ofstream(dir + "/req-4") << "capture selftest\n";
             for (int frame = 0; frame < 20; ++frame) {
                 @autoreleasepool {
                     id<MTLCommandBuffer> cb = [queue commandBuffer];

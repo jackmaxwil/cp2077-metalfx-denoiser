@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name>" (trace plus PNGs of render targets, see s_dump), "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -35,6 +35,7 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -46,7 +47,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -161,6 +164,7 @@ const char* FormatName(NSUInteger f)
     case 53: return "R32Uint";
     case 55: return "R32Float";
     case 60: return "RG16Unorm";
+    case 62: return "RG16Snorm";
     case 63: return "RG16Uint";
     case 65: return "RG16Float";
     case 70: return "RGBA8Unorm";
@@ -170,6 +174,7 @@ const char* FormatName(NSUInteger f)
     case 81: return "BGRA8Unorm_sRGB";
     case 90: return "RGB10A2Unorm";
     case 92: return "RG11B10Float";
+    case 94: return "BGR10A2Unorm";
     case 93: return "RGB9E5Float";
     case 103: return "RG32Uint";
     case 105: return "RG32Float";
@@ -349,9 +354,18 @@ struct Enc {
     bool as = false;
     bool ift = false;
     uint32_t psoSets = 0;
+    id cbObject = nil;               // dump frames only
+    std::vector<id> renderTargets;   // dump frames only
 };
 
 std::atomic<bool> s_capture{false};
+// Dump: during a traced frame, the targets of render passes with two or more color targets and the MetalFX scaler's
+// inputs are copied to buffers on the game's command buffer and written as PNGs (<name>-<n>-<what>-<w>x<h>-<format>.png;
+// a second "-alpha" PNG for formats with alpha). Request "dump <name>".
+std::atomic<bool> s_dump{false};
+bool s_dumpRequested = false;
+int s_dumpCount = 0;
+std::unordered_set<const void*> s_dumped;
 std::mutex s_capMutex;
 std::vector<std::string> s_lines;
 std::unordered_map<const void*, Enc> s_enc;
@@ -425,6 +439,7 @@ std::string s_dir;
 enum class TraceState { Idle, Armed, Capturing, GpuArmed, GpuCapturing };
 std::atomic<TraceState> s_traceState{TraceState::Idle};
 std::string s_traceName;
+std::string s_dumpName;
 std::atomic<uint64_t> s_frame{0};
 std::atomic<bool> s_sawCbPresent{false};
 
@@ -755,6 +770,11 @@ void PollRequests(uint64_t frame)
         s_traceState.store(TraceState::GpuArmed);
     } else if (kind == "perf" && !name.empty()) {
         StartPerf(name, frames ? frames : 240, frame);
+    } else if (kind == "dump" && !name.empty()) {
+        s_traceName = name;
+        s_dumpName = name;
+        s_dumpRequested = true;
+        s_traceState.store(TraceState::Armed);
     } else if (kind == "cvarbatch") {
         StartBatch(frame);
     } else {
@@ -825,12 +845,17 @@ void OnPresent(bool fromCommandBuffer)
                       static_cast<unsigned long long>(frame), static_cast<unsigned long long>(s_pipesNamed.load()),
                       static_cast<unsigned long long>(s_libCount.load()));
         s_lines.emplace_back(buf);
+        s_dumped.clear();
+        s_dumpCount = 0;
+        s_dump.store(s_dumpRequested);
         s_capture.store(true);
         s_traceState.store(TraceState::Capturing);
         break;
     }
     case TraceState::Capturing:
         s_capture.store(false);
+        s_dump.store(false);
+        s_dumpRequested = false;
         {
             std::lock_guard<std::mutex> lock(s_capMutex);
             s_lines.push_back("{\"e\":\"present\",\"frame\":" + std::to_string(frame) + "}");
@@ -1150,6 +1175,153 @@ std::string RenderTargets(MTLRenderPassDescriptor* rp)
     return out;
 }
 
+size_t BytesPerPixel(NSUInteger f)
+{
+    switch (f) {
+    case 10: case 13: return 1;
+    case 20: case 23: case 25: case 30: return 2;
+    case 53: case 55: case 60: case 62: case 63: case 65: case 70: case 71: case 73: case 80: case 81: case 90:
+    case 92: case 94: return 4;
+    case 103: case 105: case 110: case 113: case 115: return 8;
+    case 123: case 125: return 16;
+    default: return 0;
+    }
+}
+
+float Half(uint16_t h)
+{
+    __fp16 v;
+    std::memcpy(&v, &h, 2);
+    return static_cast<float>(v);
+}
+
+float SmallFloat(uint32_t bits, int mantissa) // unsigned 11/10-bit float (RG11B10)
+{
+    const uint32_t e = bits >> mantissa, m = bits & ((1u << mantissa) - 1);
+    if (e == 0) {
+        return std::ldexp(static_cast<float>(m), -14 - mantissa);
+    }
+    return std::ldexp(1.0f + static_cast<float>(m) / (1u << mantissa), static_cast<int>(e) - 15);
+}
+
+uint8_t ToByte(float v, bool tonemap)
+{
+    if (tonemap) {
+        v = v / (1.0f + std::max(v, 0.0f));
+        v = std::sqrt(std::max(v, 0.0f));
+    }
+    return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+void WritePng(const std::string& path, const std::vector<uint8_t>& rgba, size_t w, size_t h)
+{
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, rgba.data(), rgba.size(), nullptr);
+    CGImageRef image = CGImageCreate(w, h, 8, 32, w * 4, cs, kCGImageAlphaNoneSkipLast, provider, nullptr, false,
+                                     kCGRenderingIntentDefault);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(path.c_str()),
+                                                           static_cast<CFIndex>(path.size()), false);
+    if (CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, nullptr)) {
+        CGImageDestinationAddImage(dest, image, nullptr);
+        CGImageDestinationFinalize(dest);
+        CFRelease(dest);
+    }
+    CFRelease(url);
+    CGImageRelease(image);
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+}
+
+// Converts one texture's bytes to RGBA8 (and its alpha channel to a second image, when it has one).
+void ConvertAndWrite(const uint8_t* src, size_t w, size_t h, NSUInteger f, const std::string& base)
+{
+    std::vector<uint8_t> rgb(w * h * 4, 255), alpha;
+    const size_t bpp = BytesPerPixel(f);
+    const bool hasAlpha = f == 70 || f == 71 || f == 80 || f == 81 || f == 90 || f == 94 || f == 110 || f == 115 ||
+                          f == 125;
+    if (hasAlpha) {
+        alpha.assign(w * h * 4, 255);
+    }
+    for (size_t i = 0; i < w * h; ++i) {
+        const uint8_t* p = src + i * bpp;
+        float c[4] = {0, 0, 0, 1};
+        bool tonemap = false;
+        uint32_t u = 0;
+        std::memcpy(&u, p, std::min<size_t>(bpp, 4));
+        switch (f) {
+        case 10: case 13: c[0] = c[1] = c[2] = p[0] / 255.0f; break;
+        case 20: case 23: c[0] = c[1] = c[2] = (u & 0xFFFF) / 65535.0f; break;
+        case 25: c[0] = c[1] = c[2] = Half(u & 0xFFFF); tonemap = true; break;
+        case 30: c[0] = p[0] / 255.0f; c[1] = p[1] / 255.0f; break;
+        case 53: c[0] = c[1] = c[2] = (u & 0xFF) / 255.0f; break;
+        case 55: { float v; std::memcpy(&v, p, 4); c[0] = c[1] = c[2] = v; tonemap = true; break; }
+        case 60: c[0] = (u & 0xFFFF) / 65535.0f; c[1] = (u >> 16) / 65535.0f; break;
+        case 62: c[0] = 0.5f + 0.5f * std::max(-1.0f, static_cast<int16_t>(u & 0xFFFF) / 32767.0f);
+                 c[1] = 0.5f + 0.5f * std::max(-1.0f, static_cast<int16_t>(u >> 16) / 32767.0f); break;
+        case 63: c[0] = (u & 0xFFFF) / 65535.0f; c[1] = (u >> 16) / 65535.0f; break;
+        case 65: c[0] = 0.5f + 0.5f * Half(u & 0xFFFF); c[1] = 0.5f + 0.5f * Half(u >> 16); break;
+        case 70: case 71: case 73: for (int k = 0; k < 4; ++k) c[k] = p[k] / 255.0f; break;
+        case 80: case 81: c[0] = p[2] / 255.0f; c[1] = p[1] / 255.0f; c[2] = p[0] / 255.0f; c[3] = p[3] / 255.0f; break;
+        case 90: c[0] = (u & 0x3FF) / 1023.0f; c[1] = ((u >> 10) & 0x3FF) / 1023.0f; c[2] = ((u >> 20) & 0x3FF) / 1023.0f;
+                 c[3] = (u >> 30) / 3.0f; break;
+        case 94: c[2] = (u & 0x3FF) / 1023.0f; c[1] = ((u >> 10) & 0x3FF) / 1023.0f; c[0] = ((u >> 20) & 0x3FF) / 1023.0f;
+                 c[3] = (u >> 30) / 3.0f; break;
+        case 92: c[0] = SmallFloat(u & 0x7FF, 6); c[1] = SmallFloat((u >> 11) & 0x7FF, 6);
+                 c[2] = SmallFloat(u >> 22, 5); tonemap = true; break;
+        case 115: for (int k = 0; k < 4; ++k) { uint16_t hv; std::memcpy(&hv, p + 2 * k, 2); c[k] = Half(hv); }
+                  tonemap = true; break;
+        case 125: std::memcpy(c, p, 16); tonemap = true; break;
+        default: break;
+        }
+        for (int k = 0; k < 3; ++k) {
+            rgb[i * 4 + k] = ToByte(c[k], tonemap);
+        }
+        if (hasAlpha) {
+            alpha[i * 4] = alpha[i * 4 + 1] = alpha[i * 4 + 2] = ToByte(c[3], false);
+        }
+    }
+    WritePng(base + ".png", rgb, w, h);
+    if (hasAlpha) {
+        WritePng(base + "-alpha.png", alpha, w, h);
+    }
+}
+
+// Caller holds s_capMutex. Encodes a copy of t into a shared buffer on cb; the PNG is written when cb completes.
+void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
+{
+    id<MTLCommandBuffer> cb = cbObject;
+    if (!cb || !t || !s_dumped.insert((__bridge const void*)t).second) {
+        return;
+    }
+    const NSUInteger f = t.pixelFormat;
+    const size_t bpp = BytesPerPixel(f);
+    if (!bpp || t.textureType != MTLTextureType2D || t.sampleCount > 1 || t.isFramebufferOnly ||
+        t.storageMode == MTLStorageModeMemoryless) {
+        return;
+    }
+    const NSUInteger w = t.width, h = t.height, row = w * bpp;
+    id<MTLBuffer> buffer = [t.device newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+    if (!buffer) {
+        return;
+    }
+    const bool wasCapturing = s_capture.exchange(false); // keep our own blit out of the trace
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(w, h, 1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:row
+                 destinationBytesPerImage:row * h];
+    [blit endEncoding];
+    s_capture.store(wasCapturing);
+    const char* fmt = FormatName(f);
+    char name[256];
+    std::snprintf(name, sizeof(name), "%s-%02d-%s-%lux%lu-%s", s_dumpName.c_str(), s_dumpCount++, what.c_str(),
+                  (unsigned long)w, (unsigned long)h, fmt ? fmt : std::to_string(f).c_str());
+    const std::string base = s_dir + "/" + name;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+      ConvertAndWrite(static_cast<const uint8_t*>(buffer.contents), w, h, f, base);
+      [buffer release];
+    }];
+}
+
 void BeginEncoder(id cb, id enc, char kind, int dispatchType, MTLRenderPassDescriptor* rp)
 {
     if (!enc || !s_capture.load(std::memory_order_relaxed)) {
@@ -1171,6 +1343,14 @@ void BeginEncoder(id cb, id enc, char kind, int dispatchType, MTLRenderPassDescr
     }
     if (rp) {
         line += RenderTargets(rp);
+        if (s_dump.load()) {
+            e.cbObject = cb;
+            for (NSUInteger i = 0; i < 8; ++i) {
+                if (id<MTLTexture> t = rp.colorAttachments[i].texture) {
+                    e.renderTargets.push_back(t);
+                }
+            }
+        }
     }
     Emit(line + "}");
 }
@@ -1616,6 +1796,8 @@ void H_exec(id self, SEL sel, id icb, NSRange range)
 
 void H_endEnc(id self, SEL sel)
 {
+    id dumpCb = nil;
+    std::vector<id> dumpTargets;
     if (s_capture.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lock(s_capMutex);
         std::string line = "{\"e\":\"ee\"," + SeqField() + ",\"enc\":" + P((__bridge const void*)self);
@@ -1623,9 +1805,22 @@ void H_endEnc(id self, SEL sel)
             line += ",\"label\":" + Q(label);
         }
         Emit(line + "}");
-        s_enc.erase((__bridge const void*)self);
+        auto it = s_enc.find((__bridge const void*)self);
+        if (it != s_enc.end()) {
+            if (it->second.renderTargets.size() >= 2) {
+                dumpCb = it->second.cbObject;
+                dumpTargets = it->second.renderTargets;
+            }
+            s_enc.erase(it);
+        }
     }
     ORIG(o_endEnc, V0, self)(self, sel);
+    if (dumpCb) {
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        for (size_t i = 0; i < dumpTargets.size(); ++i) {
+            DumpTexture(dumpCb, dumpTargets[i], "rt" + std::to_string(i));
+        }
+    }
 }
 
 std::string AsDesc(id desc)
@@ -1734,6 +1929,13 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
         }
     }
     ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
+    if (s_dump.load()) {
+        id<MTLFXTemporalScaler> sc = self;
+        std::lock_guard<std::mutex> lock(s_capMutex);
+        DumpTexture(cb, sc.colorTexture, "fx-color");
+        DumpTexture(cb, sc.motionTexture, "fx-motion");
+        DumpTexture(cb, sc.outputTexture, "fx-output");
+    }
 }
 
 void H_fxSpatialEncode(id self, SEL sel, id cb)

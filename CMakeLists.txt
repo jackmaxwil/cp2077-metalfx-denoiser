@@ -75,6 +75,8 @@ target_link_libraries(MetalFXDenoiser PRIVATE
     "-framework Metal"
     "-framework MetalFX"
     "-framework QuartzCore"
+    "-framework ImageIO"
+    "-framework CoreGraphics"
     "-framework Foundation"
 )
 
@@ -104,10 +106,13 @@ install(FILES ${CMAKE_SOURCE_DIR}/config/config.toml.template
 )
 
 # Tracer self-test (not installed): ./build/trace_selftest
+# (trace_selftest links the same frameworks as the plugin)
 add_executable(trace_selftest tests/trace_selftest.mm tests/configvars_stub.cpp src/plugin/MetalTrace.mm
     src/plugin/Logger.cpp)
 target_include_directories(trace_selftest PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
 target_link_libraries(trace_selftest PRIVATE
+    "-framework ImageIO"
+    "-framework CoreGraphics"
     "-framework Metal"
     "-framework MetalFX"
     "-framework QuartzCore"
