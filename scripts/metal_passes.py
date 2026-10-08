@@ -47,9 +47,10 @@ def main(path):
         name = p.get("name") or "?"
         lib = p.get("lib", "").split("|")[-1]
         label = f"#{p['label']}" if p.get("label") else ""
-        if lib in INDEX:
-            # "~": the static shader cache's name table is only partly decoded; these names are tentative.
-            return f"~{INDEX[lib]}{label}"
+        entry = INDEX.get(lib)
+        if isinstance(entry, dict):
+            # Verified names as they are; "~": paired by table order only (scripts/shader_index.py).
+            return (entry["name"] if entry["status"] == "verified" else f"~{entry['name']}") + label
         return f"{name}{label}"
 
     def tex_str(tid):

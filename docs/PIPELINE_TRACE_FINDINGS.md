@@ -18,11 +18,16 @@ frame timings, screenshots, `rtbench.md`).
   `rgs_shadow_transparent_main`, `rgs_diffuse_main`, `rgs_importance_main`, `rgs_reflection_opaque_main`,
   `rgs_reflection_transparent_main`, `rgs_reference_main` (path tracing),
   `rgs_restirgi_spatiotemporal_epilogue` (path tracing).
-- **Shader libraries come from the game's caches** (`engine/shadermetal_final.cache`,
-  `engine/staticshadermetal_final.cache`); `scripts/shader_index.py` maps each library the game creates to its cache
-  entry. The static cache has a name table (REBLUR_*, RELAX_*, SIGMA_*, m_rtxdi*, m_rayTracedReference_*, ...), but its
-  layout is only partly decoded: names from it are tentative (shown as `~name`), and some are wrong (path tracing names
-  appear in raster frames).
+- **Shader libraries come from the game's caches** (`engine/shadermetal_final.cache`: 19,019 material
+  vertex/fragment libraries; `engine/staticshadermetal_final.cache`: 1,249 libraries, every compute and ray tracing
+  shader). `scripts/shader_dump.py` dumps all of them (functions, types, surviving groupshared names);
+  `scripts/shader_index.py` maps each library the game creates to its cache entry and names the static ones.
+- **Static shader names are verified, not guessed.** The static cache's record table puts a compute shader's blob key
+  110 bytes before its name, and a render shader's vertex/fragment keys 123/115 bytes before its render-target
+  parameters and names. 785 names pass that rule plus a function-type check and are "verified". Checked against the
+  game: every NRD kernel named this way dispatches 8x8 or 16x16 thread groups (16 of 16 in the traces), and raster
+  frames contain no NRD or path tracing kernels. 174 names paired only by order are tentative (`~name`; about half of
+  the NRD ones are wrong by the same check), 47 kernels have no name, 8 conflicts are dropped.
 - **The NRD CPU entry points are not the integration point.** The REBLUR/RELAX/SIGMA work runs as converted compute
   kernels dispatched by the engine.
 
@@ -58,9 +63,9 @@ Next: several windows per spot (report the best and the worst), runs on an other
   holds normals, base color, roughness and metalness is not mapped yet.
 - MetalFX temporal scaler, when the game uses it: color RGBA16Float, depth Depth32Float_Stencil8 (reversed Z), motion
   RG16Float in UV units (motion vector scale = input size), jitter in pixels, no exposure texture, pre-exposure 1.
-- The upscaler option is not what its label says: with the user's setting "FSR2" the game creates and calls the MetalFX
-  temporal scaler (internal kernels `brnetv3_*`); with "MetalFX" set in UserSettings.json before launch it does not.
-  To be resolved before benchmarking upscalers.
+- The upscaler option's index does not follow its labels: a saved "FSR2" at index 1 runs the MetalFX temporal scaler
+  (internal kernels `brnetv3_*`); "MetalFX" at index 3 runs FSR3 (`m_ffx_fsr3upscaler_*` passes). The rtbench runs of
+  2026-10-07 therefore measured FSR3 upscaling; tools/rtbench now selects index 1.
 
 ## Corrections to earlier notes
 
@@ -74,6 +79,6 @@ Next: several windows per spot (report the best and the worst), runs on an other
 - Decode the top-level argument buffer per dispatch (root signature to descriptor heap indices) to name each
   dispatch's exact textures; this is what maps NRD's inputs (normal/roughness, view Z, motion, hit distance) and
   outputs.
-- Finish the static cache name table so passes get reliable names.
+- Name the 174 order-only and 47 unnamed static kernels (the extra keys of multi-permutation records).
 - Settings changed at runtime (UserSettings) read back as changed but do not switch the ray tracing renderer; rtbench
   therefore sets each mode before launch.
