@@ -361,11 +361,12 @@ struct Enc {
 std::atomic<bool> s_capture{false};
 // Dump: during a traced frame, the targets of render passes with two or more color targets and the MetalFX scaler's
 // inputs are copied to buffers on the game's command buffer and written as PNGs (<name>-<n>-<what>-<w>x<h>-<format>.png;
-// a second "-alpha" PNG for formats with alpha). Request "dump <name>".
+// a second "-alpha" PNG for formats with alpha). Request "dump <name>". A target is written after every pass that
+// renders to it (the first pass to use the G-buffer targets only clears them), up to kMaxDumps textures per frame.
 std::atomic<bool> s_dump{false};
 bool s_dumpRequested = false;
 int s_dumpCount = 0;
-std::unordered_set<const void*> s_dumped;
+constexpr int kMaxDumps = 128;
 std::mutex s_capMutex;
 std::vector<std::string> s_lines;
 std::unordered_map<const void*, Enc> s_enc;
@@ -845,7 +846,6 @@ void OnPresent(bool fromCommandBuffer)
                       static_cast<unsigned long long>(frame), static_cast<unsigned long long>(s_pipesNamed.load()),
                       static_cast<unsigned long long>(s_libCount.load()));
         s_lines.emplace_back(buf);
-        s_dumped.clear();
         s_dumpCount = 0;
         s_dump.store(s_dumpRequested);
         s_capture.store(true);
@@ -1286,16 +1286,17 @@ void ConvertAndWrite(const uint8_t* src, size_t w, size_t h, NSUInteger f, const
     }
 }
 
-// Caller holds s_capMutex. Encodes a copy of t into a shared buffer on cb; the PNG is written when cb completes.
+// Caller holds s_capMutex. Encodes a copy of t (slice 0: the game's render targets are 2D arrays) into a shared buffer
+// on cb; the PNG is written when cb completes.
 void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
 {
     id<MTLCommandBuffer> cb = cbObject;
-    if (!cb || !t || !s_dumped.insert((__bridge const void*)t).second) {
+    if (!cb || !t || s_dumpCount >= kMaxDumps) {
         return;
     }
     const NSUInteger f = t.pixelFormat;
     const size_t bpp = BytesPerPixel(f);
-    if (!bpp || t.textureType != MTLTextureType2D || t.sampleCount > 1 || t.isFramebufferOnly ||
+    if (!bpp || (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) || t.sampleCount > 1 || t.isFramebufferOnly ||
         t.storageMode == MTLStorageModeMemoryless) {
         char why[200];
         std::snprintf(why, sizeof(why), "Metal trace: dump skips %s (format %lu, type %lu, samples %lu, framebufferOnly %d, "

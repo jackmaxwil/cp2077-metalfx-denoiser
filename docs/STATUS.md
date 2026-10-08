@@ -1,6 +1,6 @@
 # MetalFX Denoiser: Status
 
-> **Last updated:** 2026-10-07
+> **Last updated:** 2026-10-08
 > **Target:** Cyberpunk 2077 macOS 2.3.1, Apple silicon, RED4ext for macOS
 > **Status:** research prototype, no rendering changes
 
@@ -45,10 +45,13 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    toggles change RT Ultra by 1.2-1.5 ms). Next: the path tracing cost knobs (SHaRC bounces and downscale, multilayer
    resolution scale, ReSTIR GI samples), with image comparisons, not only timings.
 2. **MetalFX baseline:** rtbench with MetalFX selected, on an idle Mac, several timing windows per spot.
-3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures. The tracer's
-   "dump" request writes MetalFX's inputs as PNGs in game, but not yet the render targets (the self-test passes; in
-   game no render pass was dumped; skip reasons are now logged). Alternatives: descriptor heap decoding, or one GPU
-   capture read in Xcode.
+2b. **Done: the denoised scaler's cost** (`build/denoiser_bench`, `PIPELINE_TRACE_FINDINGS.md`): 1.76 ms at 779x487,
+   about 4.5 ms per million input pixels. That is about NRD's cost in RT Ultra and less than NRD in path tracing: the
+   swap is about quality in RT Ultra, and saves up to about 2 ms (779x487) in path tracing.
+3. **Inputs:** done for the G-buffer (`PIPELINE_TRACE_FINDINGS.md`: base color, world-space normals, metalness,
+   roughness; the in-game dump now writes every multi-target render pass). Left: specular hit distance and the noisy
+   lighting, which compute passes write through the descriptor heap: dump the textures NRD's first passes read
+   (their `useResource` reads), or decode the descriptor heap.
 3b. **NRD pass-through:** make NRD hand its noisy inputs to the composite (split screen at 1.0, or replacing the NRD
    dispatches with copies once their input and output textures are known), so the denoised scaler gets a noisy but
    complete image.

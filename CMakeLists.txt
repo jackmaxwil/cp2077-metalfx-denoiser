@@ -118,3 +118,8 @@ target_link_libraries(trace_selftest PRIVATE
     "-framework QuartzCore"
     "-framework Foundation"
 )
+
+# Denoised scaler cost at the game's sizes (not installed): ./build/denoiser_bench [frames]
+add_executable(denoiser_bench tests/denoiser_bench.mm)
+target_compile_options(denoiser_bench PRIVATE -fobjc-arc -Wno-unguarded-availability-new)
+target_link_libraries(denoiser_bench PRIVATE "-framework Metal" "-framework MetalFX" "-framework Foundation")

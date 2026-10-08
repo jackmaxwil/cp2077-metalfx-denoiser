@@ -79,13 +79,45 @@ What this means for the goal:
 
 ## G-buffer and upscaler inputs (render resolution 779x487, output 1168x730)
 
-- G-buffer pass: two BGR10A2Unorm targets, one RGBA8Unorm, one RGBA16Float, depth Depth32Float_Stencil8. Which target
-  holds normals, base color, roughness and metalness is not mapped yet.
+- G-buffer (tracer "dump", RT Ultra, `RED4ext/runs/20261008-120636-dump`): render targets are single-slice 2D arrays.
+  The first pass to use them only clears them (normal 0.5, 0.5, 1); six more passes add geometry. Final contents:
+
+  | Target | Format | Contents |
+  | --- | --- | --- |
+  | rt0 | BGR10A2Unorm | base color RGB; alpha: a 2-bit flag on a few objects |
+  | rt1 | BGR10A2Unorm | world-space normal, xyz * 0.5 + 0.5 (Z up: floors are 0.5, 0.5, 1) |
+  | rt2 | RGBA8Unorm | R metalness (0 or 1 on 95% of pixels), G roughness (continuous: asphalt high, glass low), B constant (shading model ID, probably), A a flag |
+  | rt3 (some passes) | RGBA16Float | emissive (black here except a few lights) |
+  | depth | Depth32Float_Stencil8 | reversed Z |
+
+  Not in the G-buffer: specular albedo (derive from base color and metalness), specular hit distance and the noisy
+  lighting (compute outputs of the ray generation passes, bindless; next to map).
 - MetalFX temporal scaler, when the game uses it: color RGBA16Float, depth Depth32Float_Stencil8 (reversed Z), motion
   RG16Float in UV units (motion vector scale = input size), jitter in pixels, no exposure texture, pre-exposure 1.
 - The upscaler option's index does not follow its labels: a saved "FSR2" at index 1 runs the MetalFX temporal scaler
   (internal kernels `brnetv3_*`); "MetalFX" at index 3 runs FSR3 (`m_ffx_fsr3upscaler_*` passes). The rtbench runs of
   2026-10-07 therefore measured FSR3 upscaling; tools/rtbench now selects index 1.
+
+## Apple's denoised scaler: cost (`build/denoiser_bench`, 2026-10-08)
+
+`MTLFXTemporalDenoisedScaler` against the plain `MTLFXTemporalScaler`, M4 Max, idle GPU, game formats (color
+RGBA16Float, depth Depth32Float, motion RG16Float, BGR10A2 albedos, RGBA16Float normals, R16Float roughness and
+specular hit distance), synchronous initialization, median of 200 frames:
+
+| Input | Output | Temporal scaler ms | Denoised scaler ms |
+| --- | --- | ---: | ---: |
+| 779x487 | 1168x730 | 0.11 | 1.76 |
+| 1152x720 | 1728x1080 | 0.24 | 3.43 |
+| 1280x800 | 2560x1600 | 0.40 | 4.96 |
+| 1728x1117 | 3456x2234 | 0.77 | 9.40 |
+| 2304x1489 | 3456x2234 | 1.13 | 15.01 |
+| 1920x1080 | 1920x1080 (denoise only) | 0.50 | 7.67 |
+
+The denoised scaler costs about 4.5 ms per million input pixels, roughly what NRD and its surrounding passes cost in
+RT Ultra (2.6-7.9 ms per million at 779x487) and less than in path tracing (4.5-9.8 ms per million). Replacing NRD and
+the temporal scaler with it is therefore about break-even in RT Ultra and saves up to about 2 ms at 779x487 (5 ms at
+1080p output) in path tracing. The case for the swap is image quality (one denoiser trained for upscaled, ray traced
+input), and frame time only in path tracing.
 
 ## Corrections to earlier notes
 

@@ -107,7 +107,7 @@ int main()
         }
         sleep(3);
 
-        // Dump: a frame with a two-target render pass (RGBA8 cleared to red, BGR10A2 to green).
+        // Dump: a frame with a two-target render pass (RGBA8 cleared to red, BGR10A2 2D array to green).
         MTLTextureDescriptor* rtd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                       width:32
                                                                                      height:16
@@ -115,6 +115,7 @@ int main()
         rtd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         id<MTLTexture> rt0 = [dev newTextureWithDescriptor:rtd];
         rtd.pixelFormat = MTLPixelFormatBGR10A2Unorm;
+        rtd.textureType = MTLTextureType2DArray; // like the game's render targets
         id<MTLTexture> rt1 = [dev newTextureWithDescriptor:rtd];
         std::ofstream(dir + "/req-3") << "dump selftestdump\n";
         for (int frame = 0; frame < 20; ++frame) {
