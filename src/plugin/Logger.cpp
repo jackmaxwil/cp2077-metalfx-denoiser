@@ -81,11 +81,8 @@ void Shutdown()
 
 void Log(Level level, std::string_view message)
 {
+    Initialize(); // no-op once initialized; takes the lock itself
     std::scoped_lock _(s_mutex);
-    if (!s_initialized)
-    {
-        Initialize();
-    }
 
     const auto line = "[" + Timestamp() + "] [MetalFXDenoiser] [" + std::string(LevelTag(level)) + "] " +
                       std::string(message);
