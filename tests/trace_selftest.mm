@@ -257,7 +257,7 @@ int main()
                 return Fail("denoise pass-through did not copy the inputs");
             }
 
-            // PrePass kept (the default): its two written textures are copied. The kept dispatches run the self-test
+            // PrePass kept (the default): its two written textures are copied, in reverse address order. The kept dispatches run the self-test
             // kernel, so they get real textures to work on.
             for (int i = 0; i < 4; ++i) {
                 std::vector<__fp16> px(8 * 4 * 4, (__fp16)(i < 2 ? 5 + i : 0));
@@ -285,7 +285,7 @@ int main()
                 [t[2 + i] getBytes:o[i] bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4
                          fromRegion:MTLRegionMake2D(7, 3, 1, 1) mipmapLevel:0 slice:0];
             }
-            const float want5 = (lowFirst == outLowFirst) ? 5 : 6;
+            const float want5 = (lowFirst == outLowFirst) ? 6 : 5; // path tracing pairs PrePass's outputs reversed
             if ((float)o[0][0] != want5 || (float)o[1][0] != 11 - want5) {
                 std::fprintf(stderr, "denoise prepass outputs %.1f %.1f\n", (float)o[0][0], (float)o[1][0]);
                 return Fail("denoise pass-through did not copy the PrePass outputs");

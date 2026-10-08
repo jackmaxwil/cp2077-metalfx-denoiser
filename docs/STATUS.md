@@ -79,6 +79,11 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    frame rates each frame uncovers a wide band at the edge whose raw path traced signal is nearly black, and the stock
    denoiser hides it with RELAX's PrePass and HistoryFix. Path tracing now keeps RELAX's PrePass by default
    (`denoiseprepass on|off`), as RT Ultra already did. Player check (3456x2160, Performance): edges fixed.
+4e. **Fixed: pale white skin and washed-out colors in path tracing (player report).** The path tracing PrePass's two
+   outputs are allocated specular first, so pairing them with RELAX's outputs by address swapped diffuse and specular
+   (since the PrePass default of 4c). Reversed (`kChains` in Denoise.mm), the image is the closest to the game's NRD of
+   all variants: `RTBENCH_SCENARIO=skin` at Kabuki Market, mean error against NRD 4.4 (was 14.2; raw input 4.8).
+   RT Ultra's separate diffuse and specular PrePass outputs were already right (3.2).
 4d. **Fixed: stutter growing over minutes, a load that never finished.** The buffer registry recorded every buffer
    the game created (metadata plus a lock on buffer creation) and grew without bound while streaming; with the
    denoiser on from boot a load sat on the loading screen for 15 minutes, and a play session started stuttering after

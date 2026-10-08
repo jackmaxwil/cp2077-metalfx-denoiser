@@ -60,16 +60,20 @@ struct Chain {
     const char* keep; // this pass (and those before it) keep running; its RGBA16Float output is the copy source
     const char* end;
     size_t width;     // textures per instance
+    bool reverse;     // the copy sources' address order is the reverse of the outputs' (see kChains)
 };
 // Path tracing keeps its PrePass when g_ptPrepass is set (the default): its light spatial pre-blur fills the
 // disoccluded bands at the screen edges that fast camera turns at low frame rates uncover, which the raw signal
 // shows nearly black until the denoiser's history builds up.
 std::atomic<bool> g_ptPrepass{true};
 const Chain kChains[] = {
-    {"path tracing", {"2684890295", "1624964913"}, nullptr, "1807644384", 2},
-    {"path tracing", {"2684890295", "1624964913"}, "1624964913", "1807644384", 2},
-    {"diffuse", {"2146613912", nullptr}, "2146613912", "1741889550", 1},
-    {"specular", {"2571244900", nullptr}, "2571244900", "3863891985", 1},
+    {"path tracing", {"2684890295", "1624964913"}, nullptr, "1807644384", 2, false},
+    // The path tracing PrePass's two outputs are allocated specular first: paired by address order, diffuse and
+    // specular swapped and washed out the colors (skin turned pale white). Reversed, the image is the closest to the
+    // game's NRD of all variants (skin scenario at Kabuki Market: mean error 4.8 against 14.2 swapped, 5.1 raw).
+    {"path tracing", {"2684890295", "1624964913"}, "1624964913", "1807644384", 2, true},
+    {"diffuse", {"2146613912", nullptr}, "2146613912", "1741889550", 1, false},
+    {"specular", {"2571244900", nullptr}, "2571244900", "3863891985", 1, false},
 };
 
 const Chain* StartOf(const std::string& label)
@@ -203,6 +207,9 @@ std::vector<id<MTLTexture>> Pick(const Enc& e, bool written)
 
 void Close(Enc& e)
 {
+    if (e.chain->reverse && e.kept) {
+        std::reverse(e.in.begin(), e.in.end());
+    }
     if (e.in.size() == e.chain->width && e.out.size() == e.chain->width) {
         for (size_t i = 0; i < e.in.size(); ++i) {
             e.jobs.push_back({e.in[i], e.out[i]});
