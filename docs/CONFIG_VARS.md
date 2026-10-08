@@ -20,11 +20,12 @@ frame against baselines right before and after each change, MetalFX, 779x487 ren
 Batch experiments (`experiments/*.txt`, plugin `cvarbatch`, `scripts/cvar_report.py`, runs
 `RED4ext/runs/20261008-105*-cvarbatch`, `-110*-cvarbatch`):
 
-- **`RayTracing/DenoisingShaderPreferenceAAPL` 1 to 0 switches NRD off**: every REBLUR, RELAX and SIGMA dispatch and
-  the unnamed passes around them disappear (frame traces `cvar0-exp` / `cvar0-base`), nothing replaces them. GPU time
-  -2.0 to -3.5 ms in RT Ultra (17-27%), -2.2 to -3.0 ms in path tracing (13-17%). NRD therefore costs 2-3.5 ms, not the
-  ~1 ms the name-based skip test could see. The still screenshots barely change (PSNR 35 dB, no-change floor 41-44)
-  because time is frozen and MetalFX's temporal accumulation converges the noise; motion shows the real quality.
+- **`RayTracing/DenoisingShaderPreferenceAAPL` 1 to 0 switches NRD off, and with it the denoised lighting.** Every
+  REBLUR, RELAX and SIGMA dispatch and the unnamed passes around them disappear (frame traces `cvar0-exp` /
+  `cvar0-base`) and nothing replaces them: the lighting NRD would output is simply missing. In motion, path tracing at
+  Megabuilding H10 goes almost black except emissives (rtbench `pt-nonrd`, 2026-10-08). Not a player setting. What it
+  measures: NRD and its surrounding passes cost 1.0-3.0 ms in RT Ultra and 1.7-3.7 ms in path tracing (rtbench, 5
+  spots, steady windows), against ~1 ms for the verified-name NRD passes alone.
 - **Valid values only.** Writing 2 to the same variable crashed the game (null dereference in render code) in both
   modes. Only write values known to be valid (the default, 0/1 for flags) until a variable's readers are checked.
 - `RayTracing/EnableReferenceAAPLOptim`: the default 2 is the fastest path tracing option (0: +1.7 ms, 1: +1.0 ms,

@@ -30,10 +30,11 @@ What the tracing work settled:
 - **The baseline:** the upscaler option's index decides the upscaler (index 1 is MetalFX); all rtbench runs before
   2026-10-08 measured FSR3.
 
-Measured: ray generation is 4.6 ms of an 11.3 ms RT Ultra frame (passcost); NRD is 2-3.5 ms (the engine's own
-switch `RayTracing/DenoisingShaderPreferenceAAPL=0` turns it off, `CONFIG_VARS.md`). So the swap pays: removing NRD saves
-17-27% of the RT Ultra frame, and the same switch gives `MTLFXTemporalDenoisedScaler` the noisy input it expects. The
-question is what the denoised scaler costs and how it looks in motion against NRD.
+Measured: ray generation is 4.6 ms of an 11.3 ms RT Ultra frame (passcost); NRD and its surrounding passes are
+1-3 ms in RT Ultra and 1.7-3.7 ms in path tracing (`RayTracing/DenoisingShaderPreferenceAAPL=0` removes them, but
+also the lighting they output, `CONFIG_VARS.md`). So the swap can save 10-20% of the frame if the denoised scaler costs
+less than NRD. Its input must be the noisy lighting composited as if NRD had passed it through: NRD's debug split
+screen (`Editor/Denoising/NRD/DebugSplitScreen`) does that, being tested next.
 
 ## Next steps
 
