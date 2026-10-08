@@ -1,5 +1,6 @@
 // Self-test for MetalTrace: runs a small Metal workload through every hooked path and checks the trace and perf
 // files. Build target trace_selftest; run it from the build folder: ./trace_selftest
+// (MTL_CAPTURE_ENABLED=1 ./trace_selftest also checks the GPU capture.)
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -105,6 +106,24 @@ int main()
             }
         }
         sleep(3);
+
+        if (getenv("MTL_CAPTURE_ENABLED")) {
+            std::ofstream(dir + "/req-3") << "capture selftest\n";
+            for (int frame = 0; frame < 20; ++frame) {
+                @autoreleasepool {
+                    id<MTLCommandBuffer> cb = [queue commandBuffer];
+                    id<CAMetalDrawable> drawable = [layer nextDrawable];
+                    if (drawable) {
+                        [cb presentDrawable:drawable];
+                    }
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                }
+            }
+            if (access((dir + "/selftest.gputrace").c_str(), F_OK) != 0) {
+                return Fail("no selftest.gputrace");
+            }
+        }
 
         const std::string trace = Slurp(dir + "/selftest.trace.jsonl");
         if (trace.find("\"e\":\"d\"") == std::string::npos) {

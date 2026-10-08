@@ -8,8 +8,12 @@
 // - Frame timing: on request, GPU time of N frames (union of the frame's command buffer GPU intervals) and the
 //   present-to-present time.
 //
-// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>" or "perf <name> <frames>". Results are
-// written next to them: <name>.trace.jsonl, <name>.perf.json. tools/cp-run writes the requests for scenario scripts.
+// - GPU capture: on request, one frame as an Xcode .gputrace document (needs MTL_CAPTURE_ENABLED=1 in the game's
+//   environment), for per-pass timing and resource views in Xcode.
+//
+// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>" or
+// "capture <name>". Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
+// tools/cp-run writes the requests for scenario scripts.
 //
 // Built without ARC: hooks receive their arguments unretained, as the original methods do.
 
@@ -405,7 +409,7 @@ std::string Groups(const std::vector<std::string>& g)
 
 // --- requests and output -----------------------------------------------------------------------------------------
 std::string s_dir;
-enum class TraceState { Idle, Armed, Capturing };
+enum class TraceState { Idle, Armed, Capturing, GpuArmed, GpuCapturing };
 std::atomic<TraceState> s_traceState{TraceState::Idle};
 std::string s_traceName;
 std::atomic<uint64_t> s_frame{0};
@@ -536,6 +540,9 @@ void PollRequests(uint64_t frame)
     if (kind == "trace" && !name.empty()) {
         s_traceName = name;
         s_traceState.store(TraceState::Armed);
+    } else if (kind == "capture" && !name.empty()) {
+        s_traceName = name;
+        s_traceState.store(TraceState::GpuArmed);
     } else if (kind == "perf" && !name.empty()) {
         std::lock_guard<std::mutex> lock(s_perfMutex);
         s_perf = {};
@@ -623,6 +630,28 @@ void OnPresent(bool fromCommandBuffer)
             s_lines.push_back("{\"e\":\"present\",\"frame\":" + std::to_string(frame) + "}");
         }
         StopCapture();
+        s_traceState.store(TraceState::Idle);
+        break;
+    case TraceState::GpuArmed: {
+        MTLCaptureDescriptor* desc = [[MTLCaptureDescriptor new] autorelease];
+        desc.captureObject = MTLCreateSystemDefaultDevice();
+        desc.destination = MTLCaptureDestinationGPUTraceDocument;
+        const std::string path = s_dir + "/" + s_traceName + ".gputrace";
+        desc.outputURL = [NSURL fileURLWithPath:@(path.c_str())];
+        NSError* error = nil;
+        if ([[MTLCaptureManager sharedCaptureManager] startCaptureWithDescriptor:desc error:&error]) {
+            s_traceState.store(TraceState::GpuCapturing);
+        } else {
+            Logger::Warn(std::string("Metal trace: GPU capture failed (the game needs MTL_CAPTURE_ENABLED=1): ") +
+                         (error ? error.localizedDescription.UTF8String : "unknown"));
+            s_traceState.store(TraceState::Idle);
+        }
+        [desc.captureObject release];
+        break;
+    }
+    case TraceState::GpuCapturing:
+        [[MTLCaptureManager sharedCaptureManager] stopCapture];
+        Logger::Info("Metal trace: wrote " + s_traceName + ".gputrace");
         s_traceState.store(TraceState::Idle);
         break;
     case TraceState::Idle:
