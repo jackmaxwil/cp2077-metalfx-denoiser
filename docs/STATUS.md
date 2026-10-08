@@ -57,7 +57,12 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
 3b. **NRD pass-through:** make NRD hand its noisy inputs to the composite (split screen at 1.0, or replacing the NRD
    dispatches with copies once their input and output textures are known), so the denoised scaler gets a noisy but
    complete image.
-4. **Prototype:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
+4. **Done: path tracing prototype** (`src/plugin/Denoise.mm`, `PIPELINE_TRACE_FINDINGS.md`): RELAX dropped and
+   passed through, MetalFX's denoised scaler in place of the temporal scaler. 0.2-0.7 ms faster than the game's NRD
+   path at the same preset; at Performance it is 25% faster than the game at Quality with a similar still image.
+   Next: motion tests (rtbench flicker, ghosting), camera matrices (identity now), RT Ultra (half width checkerboard
+   inputs), and making the mode a player setting.
+4a. **Original plan:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path
    tracing rays and bounces, the Apple denoiser masks) with passcost and rtbench.

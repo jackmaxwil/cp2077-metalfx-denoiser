@@ -82,83 +82,113 @@ int main(int argc, char** argv)
         printf("%s, denoised scaler input scale %.2f-%.2f, %d frames per row\n\n", d.name.UTF8String,
                [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMinScaleForDevice:d],
                [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMaxScaleForDevice:d], frames);
-        printf("| Input | Output | Temporal scaler ms (median/p90) | Denoised scaler ms (median/p90) |\n"
-               "| --- | --- | ---: | ---: |\n");
+        printf("| Case | Input | Output | Temporal scaler ms | Denoised scaler ms (median/p90) |\n"
+               "| --- | --- | --- | ---: | ---: |\n");
 
-        const struct { NSUInteger iw, ih, ow, oh; } sizes[] = {
-            {779, 487, 1168, 730},    // rtbench window, MetalFX Quality
-            {1152, 720, 1728, 1080},  // 1080p output, Quality
-            {1280, 800, 2560, 1600},  // 1600p output, Performance
-            {1728, 1117, 3456, 2234}, // MacBook Pro 16 native, Performance
-            {2304, 1489, 3456, 2234}, // MacBook Pro 16 native, Quality
-            {1920, 1080, 1920, 1080}, // denoise only, no upscale
+        struct Case {
+            const char* name;
+            NSUInteger iw, ih, ow, oh;
+            MTLPixelFormat depth = MTLPixelFormatDepth32Float, normal = MTLPixelFormatRGBA16Float,
+                           rough = MTLPixelFormatR16Float, albedo = MTLPixelFormatBGR10A2Unorm,
+                           motion = MTLPixelFormatRG16Float;
+            bool hit = true, autoExposure = false, plain = true;
         };
-        const MTLPixelFormat color = MTLPixelFormatRGBA16Float, motion = MTLPixelFormatRG16Float,
-                             gbuf = MTLPixelFormatBGR10A2Unorm, rough = MTLPixelFormatR16Float;
-        for (const auto& s : sizes) {
+        std::vector<Case> cases = {
+            {"base", 779, 487, 1168, 730},
+            {"no hit distance", 779, 487, 1168, 730},
+            {"8-bit normal/roughness/albedo", 779, 487, 1168, 730},
+            {"game depth D32S8, RGBA16F motion", 779, 487, 1168, 730},
+            {"auto exposure", 779, 487, 1168, 730},
+            {"input 2x (Performance)", 584, 365, 1168, 730},
+            {"input 3x (Ultra Performance)", 389, 243, 1168, 730},
+            {"1080p Quality", 1152, 720, 1728, 1080},
+            {"1080p Performance", 960, 540, 1920, 1080},
+            {"1080p 3x", 640, 360, 1920, 1080},
+            {"MBP16 Quality", 2304, 1489, 3456, 2234},
+            {"MBP16 Performance", 1728, 1117, 3456, 2234},
+            {"MBP16 3x", 1152, 745, 3456, 2234},
+            {"denoise only 1080p", 1920, 1080, 1920, 1080},
+        };
+        cases[1].hit = false;
+        cases[2].normal = MTLPixelFormatRGBA8Snorm;
+        cases[2].rough = MTLPixelFormatR8Unorm;
+        cases[2].albedo = MTLPixelFormatRGBA8Unorm;
+        cases[3].depth = MTLPixelFormatDepth32Float_Stencil8;
+        cases[3].motion = MTLPixelFormatRGBA16Float;
+        cases[4].autoExposure = true;
+        for (size_t i = 1; i < 5; ++i) {
+            cases[i].plain = false;
+        }
+        auto bytes = [](MTLPixelFormat f) -> size_t {
+            switch (f) {
+            case MTLPixelFormatRGBA16Float: return 8;
+            case MTLPixelFormatR16Float: return 2;
+            case MTLPixelFormatR8Unorm: return 1;
+            case MTLPixelFormatDepth32Float: case MTLPixelFormatDepth32Float_Stencil8: return 0;
+            default: return 4;
+            }
+        };
+        const MTLPixelFormat color = MTLPixelFormatRGBA16Float;
+        for (const auto& s : cases) {
             const MTLTextureUsage rw = MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
-            id<MTLTexture> c = Make(d, color, s.iw, s.ih, rw), m = Make(d, motion, s.iw, s.ih, rw),
-                           z = Make(d, MTLPixelFormatDepth32Float, s.iw, s.ih, MTLTextureUsageRenderTarget),
-                           da = Make(d, gbuf, s.iw, s.ih, rw), sa = Make(d, gbuf, s.iw, s.ih, rw),
-                           n = Make(d, MTLPixelFormatRGBA16Float, s.iw, s.ih, rw), r = Make(d, rough, s.iw, s.ih, rw),
-                           hit = Make(d, rough, s.iw, s.ih, rw),
+            id<MTLTexture> c = Make(d, color, s.iw, s.ih, rw), m = Make(d, s.motion, s.iw, s.ih, rw),
+                           z = Make(d, s.depth, s.iw, s.ih, MTLTextureUsageRenderTarget),
+                           da = Make(d, s.albedo, s.iw, s.ih, rw), sa = Make(d, s.albedo, s.iw, s.ih, rw),
+                           n = Make(d, s.normal, s.iw, s.ih, rw), r = Make(d, s.rough, s.iw, s.ih, rw),
+                           hit = Make(d, MTLPixelFormatR16Float, s.iw, s.ih, rw),
                            out = Make(d, color, s.ow, s.oh, MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget);
-            Noise(q, c, 8);
-            Noise(q, m, 4);
-            Noise(q, da, 4);
-            Noise(q, sa, 4);
-            Noise(q, n, 8);
-            Noise(q, r, 2);
-            Noise(q, hit, 2);
+            for (id<MTLTexture> t : {c, m, da, sa, n, r, hit}) {
+                Noise(q, t, bytes(t.pixelFormat));
+            }
 
-            MTLFXTemporalScalerDescriptor* td = [MTLFXTemporalScalerDescriptor new];
-            td.colorTextureFormat = color;
-            td.depthTextureFormat = MTLPixelFormatDepth32Float;
-            td.motionTextureFormat = motion;
-            td.outputTextureFormat = color;
-            td.inputWidth = s.iw;
-            td.inputHeight = s.ih;
-            td.outputWidth = s.ow;
-            td.outputHeight = s.oh;
-            td.requiresSynchronousInitialization = YES;
-            id<MTLFXTemporalScaler> ts = [td newTemporalScalerWithDevice:d];
+            Stats a{-1, -1}, b{-1, -1};
+            if (s.plain) {
+                MTLFXTemporalScalerDescriptor* td = [MTLFXTemporalScalerDescriptor new];
+                td.colorTextureFormat = color;
+                td.depthTextureFormat = s.depth;
+                td.motionTextureFormat = s.motion;
+                td.outputTextureFormat = color;
+                td.inputWidth = s.iw;
+                td.inputHeight = s.ih;
+                td.outputWidth = s.ow;
+                td.outputHeight = s.oh;
+                td.requiresSynchronousInitialization = YES;
+                if (id<MTLFXTemporalScaler> ts = [td newTemporalScalerWithDevice:d]) {
+                    ts.colorTexture = c;
+                    ts.depthTexture = z;
+                    ts.motionTexture = m;
+                    ts.outputTexture = out;
+                    ts.depthReversed = YES;
+                    ts.motionVectorScaleX = s.iw;
+                    ts.motionVectorScaleY = s.ih;
+                    ts.inputContentWidth = s.iw;
+                    ts.inputContentHeight = s.ih;
+                    a = Time(q, frames, [&](id<MTLCommandBuffer> cb, int i) {
+                        ts.jitterOffsetX = (i % 8) / 8.0f - 0.5f;
+                        ts.jitterOffsetY = (i % 3) / 3.0f - 0.5f;
+                        [ts encodeToCommandBuffer:cb];
+                    });
+                }
+            }
 
             MTLFXTemporalDenoisedScalerDescriptor* dd = [MTLFXTemporalDenoisedScalerDescriptor new];
             dd.colorTextureFormat = color;
-            dd.depthTextureFormat = MTLPixelFormatDepth32Float;
-            dd.motionTextureFormat = motion;
-            dd.diffuseAlbedoTextureFormat = gbuf;
-            dd.specularAlbedoTextureFormat = gbuf;
-            dd.normalTextureFormat = MTLPixelFormatRGBA16Float;
-            dd.roughnessTextureFormat = rough;
-            dd.specularHitDistanceTextureFormat = rough;
-            dd.specularHitDistanceTextureEnabled = YES;
+            dd.depthTextureFormat = s.depth;
+            dd.motionTextureFormat = s.motion;
+            dd.diffuseAlbedoTextureFormat = s.albedo;
+            dd.specularAlbedoTextureFormat = s.albedo;
+            dd.normalTextureFormat = s.normal;
+            dd.roughnessTextureFormat = s.rough;
+            dd.specularHitDistanceTextureFormat = MTLPixelFormatR16Float;
+            dd.specularHitDistanceTextureEnabled = s.hit;
+            dd.autoExposureEnabled = s.autoExposure;
             dd.outputTextureFormat = color;
             dd.inputWidth = s.iw;
             dd.inputHeight = s.ih;
             dd.outputWidth = s.ow;
             dd.outputHeight = s.oh;
             dd.requiresSynchronousInitialization = YES;
-            id<MTLFXTemporalDenoisedScaler> ds = [dd newTemporalDenoisedScalerWithDevice:d];
-
-            Stats a{-1, -1}, b{-1, -1};
-            if (ts) {
-                ts.colorTexture = c;
-                ts.depthTexture = z;
-                ts.motionTexture = m;
-                ts.outputTexture = out;
-                ts.depthReversed = YES;
-                ts.motionVectorScaleX = s.iw;
-                ts.motionVectorScaleY = s.ih;
-                ts.inputContentWidth = s.iw;
-                ts.inputContentHeight = s.ih;
-                a = Time(q, frames, [&](id<MTLCommandBuffer> cb, int i) {
-                    ts.jitterOffsetX = (i % 8) / 8.0f - 0.5f;
-                    ts.jitterOffsetY = (i % 3) / 3.0f - 0.5f;
-                    [ts encodeToCommandBuffer:cb];
-                });
-            }
-            if (ds) {
+            if (id<MTLFXTemporalDenoisedScaler> ds = [dd newTemporalDenoisedScalerWithDevice:d]) {
                 ds.colorTexture = c;
                 ds.depthTexture = z;
                 ds.motionTexture = m;
@@ -166,7 +196,7 @@ int main(int argc, char** argv)
                 ds.specularAlbedoTexture = sa;
                 ds.normalTexture = n;
                 ds.roughnessTexture = r;
-                ds.specularHitDistanceTexture = hit;
+                ds.specularHitDistanceTexture = s.hit ? hit : nil;
                 ds.outputTexture = out;
                 ds.depthReversed = YES;
                 ds.motionVectorScaleX = s.iw;
@@ -179,19 +209,15 @@ int main(int argc, char** argv)
                     [ds encodeToCommandBuffer:cb];
                 });
             }
-            auto cell = [](Stats x) {
-                static char buf[2][32];
-                static int k = 0;
-                k ^= 1;
-                if (x.median < 0) {
-                    snprintf(buf[k], sizeof(buf[k]), "unavailable");
-                } else {
-                    snprintf(buf[k], sizeof(buf[k]), "%.2f / %.2f", x.median, x.p90);
-                }
-                return buf[k];
-            };
-            printf("| %lux%lu | %lux%lu | %s | %s |\n", (unsigned long)s.iw, (unsigned long)s.ih,
-                   (unsigned long)s.ow, (unsigned long)s.oh, cell(a), cell(b));
+            char ta[32] = "", tb[32] = "unavailable";
+            if (a.median >= 0) {
+                snprintf(ta, sizeof(ta), "%.2f", a.median);
+            }
+            if (b.median >= 0) {
+                snprintf(tb, sizeof(tb), "%.2f / %.2f", b.median, b.p90);
+            }
+            printf("| %s | %lux%lu | %lux%lu | %s | %s |\n", s.name, (unsigned long)s.iw, (unsigned long)s.ih,
+                   (unsigned long)s.ow, (unsigned long)s.oh, ta, tb);
             fflush(stdout);
         }
     }

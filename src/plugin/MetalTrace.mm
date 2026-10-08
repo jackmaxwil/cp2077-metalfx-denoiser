@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx" (Denoise.mm), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -30,6 +30,7 @@
 
 #include "MetalTrace.hpp"
 #include "ConfigVars.hpp"
+#include "Denoise.hpp"
 #include "Logger.hpp"
 
 #import <Metal/Metal.h>
@@ -798,6 +799,10 @@ void PollRequests(uint64_t frame)
             at = comma + 1;
         }
         s_traceState.store(TraceState::Armed);
+    } else if (kind == "denoise") {
+        if (!Denoise::SetMode(name)) {
+            Logger::Warn("Metal trace: unknown denoise mode " + name);
+        }
     } else if (kind == "cvarbatch") {
         StartBatch(frame);
     } else {
@@ -1408,6 +1413,9 @@ id H_cbComputeDesc(id self, SEL sel, id desc)
 id H_cbRender(id self, SEL sel, id desc)
 {
     id enc = ORIG(o_cbRender, Id1, self)(self, sel, desc);
+    if (Denoise::Active()) {
+        Denoise::RenderPass(desc);
+    }
     BeginEncoder(self, enc, 'r', -1, desc);
     return enc;
 }
@@ -1415,6 +1423,9 @@ id H_cbRender(id self, SEL sel, id desc)
 id H_cbParallel(id self, SEL sel, id desc)
 {
     id enc = ORIG(o_cbParallel, Id1, self)(self, sel, desc);
+    if (Denoise::Active()) {
+        Denoise::RenderPass(desc);
+    }
     BeginEncoder(self, enc, 'p', -1, desc);
     return enc;
 }
@@ -1579,6 +1590,17 @@ void H_setCps(id self, SEL sel, id pso)
         t_enc = (__bridge const void*)self;
         t_drop = s_skipPipes.count((__bridge const void*)pso) != 0;
     }
+    if (Denoise::Active()) {
+        std::string label;
+        {
+            std::shared_lock<std::shared_mutex> pipes(s_pipesMutex);
+            auto it = s_pipes.find((__bridge const void*)pso);
+            if (it != s_pipes.end()) {
+                label = it->second.label;
+            }
+        }
+        Denoise::BindPipeline(self, label);
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lock(s_capMutex);
         Enc& e = EncOf(self);
@@ -1669,6 +1691,9 @@ void NoteUse(id self, id const* res, NSUInteger count, NSUInteger usage)
 
 void H_useRes(id self, SEL sel, id res, NSUInteger usage)
 {
+    if (Denoise::Active()) {
+        Denoise::Use(self, reinterpret_cast<const void* const*>(&res), 1, usage);
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         NoteUse(self, &res, 1, usage);
     }
@@ -1685,6 +1710,9 @@ void H_useResStages(id self, SEL sel, id res, NSUInteger usage, NSUInteger stage
 
 void H_useRess(id self, SEL sel, const id* res, NSUInteger count, NSUInteger usage)
 {
+    if (Denoise::Active()) {
+        Denoise::Use(self, reinterpret_cast<const void* const*>(res), count, usage);
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         NoteUse(self, res, count, usage);
     }
@@ -1800,7 +1828,7 @@ void H_dispTG(id self, SEL sel, MTLSize groups, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "tg", groups, threads);
     }
-    if (Dropped(self)) {
+    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
         return;
     }
     ORIG(o_dispTG, Disp, self)(self, sel, groups, threads);
@@ -1811,7 +1839,7 @@ void H_dispTh(id self, SEL sel, MTLSize grid, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "th", grid, threads);
     }
-    if (Dropped(self)) {
+    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
         return;
     }
     ORIG(o_dispTh, Disp, self)(self, sel, grid, threads);
@@ -1822,7 +1850,7 @@ void H_dispInd(id self, SEL sel, id buffer, NSUInteger offset, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "ind", MTLSizeMake(0, 0, 0), threads);
     }
-    if (Dropped(self)) {
+    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
         return;
     }
     ORIG(o_dispInd, DispInd, self)(self, sel, buffer, offset, threads);
@@ -1840,6 +1868,9 @@ void H_exec(id self, SEL sel, id icb, NSRange range)
 
 void H_endEnc(id self, SEL sel)
 {
+    if (Denoise::Active()) {
+        Denoise::EndEncoding(self);
+    }
     id dumpCb = nil;
     std::vector<id> dumpTargets;
     std::vector<std::pair<id, std::string>> dumpDispatchTex;
@@ -1982,7 +2013,9 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
             Logger::Info("Metal trace: first MetalFX temporal scaler call " + line);
         }
     }
-    ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
+    if (!(Denoise::Active() && Denoise::EncodeScaler(self, cb))) {
+        ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
+    }
     if (s_dump.load()) {
         id<MTLFXTemporalScaler> sc = self;
         std::lock_guard<std::mutex> lock(s_capMutex);
@@ -2067,6 +2100,9 @@ bool Install()
     mkdir(s_dir.c_str(), 0755);
     if (const char* r = std::getenv("METALFX_TRACE_REFLECTION")) {
         s_reflection = r[0] != '0';
+    }
+    if (const char* m = std::getenv("METALFX_DENOISE")) {
+        Denoise::SetMode(m);
     }
 
     // The driver's classes are private (AGX...), so find them by making one object of each kind.

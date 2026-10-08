@@ -115,6 +115,37 @@ The denoised outputs are not declared by any later dispatch: the passes that con
 `useHeap` or a render pass. Finding that consumer is the next step for an NRD pass-through (copy reconstructed noisy
 radiance into the denoised outputs and skip RELAX).
 
+## Path tracing prototype: NRD pass-through and the denoised scaler (`Denoise.mm`, 2026-10-08)
+
+Path tracing's RELAX runs in one serial compute encoder: two instances, each starting with HitDistReconstruction
+(label 2684890295, first instance only) or PrePass (1624964913), which read the two noisy RGBA16Float radiance textures
+(full resolution, demodulated: no albedo), and ending with four a-trous iterations (1807644384), the last of which
+writes the instance's outputs. Each NRD texture is used through two objects 0x280 apart (read and write views). The
+order-only shader names inside this encoder are wrong (the a-trous iterations are indexed as
+`m_rayTracedHitShaderGI`).
+
+The plugin's "denoise" mode (`METALFX_DENOISE=pass|fx`, or the tracer request `denoise off|pass|fx`) drops every
+dispatch of both instances and copies the inputs to the outputs at the end of the encoder ("pass"); "fx" also replaces
+the game's MetalFX temporal scaler call with `MTLFXTemporalDenoisedScaler`, fed guide textures computed from the
+G-buffer (diffuse and specular albedo from base color and metalness, normals, roughness) and identity camera matrices.
+`RTBENCH_SCENARIO=denoise [RTBENCH_PRESET=Performance@3] tools/rtbench pt`, then `scripts/passcost_report.py <run>`
+(time frozen at the save's position, each mode twice, drift corrected).
+
+Frame interval (ms, median of 180 frames; summed command buffer GPU time overstates the denoised scaler because frames
+overlap on the GPU):
+
+| MetalFX preset (input, output 1168x730) | off (NRD + temporal scaler) | pass | fx | fx saves |
+| --- | ---: | ---: | ---: | ---: |
+| Quality (779x487) | 15.6 | 13.6 | 14.9 | 0.70 |
+| Balanced (687x429) | 14.4 | 12.5 | 13.8 | 0.55 |
+| Performance (584x365) | 11.9 | 10.8 | 11.7 | 0.18 |
+
+- RELAX costs 1.1-2.0 ms of a path traced frame; the denoised scaler costs 0.9-1.3 ms in its place: no overhead.
+- Still images (time frozen): pass is grainy, fx is clean and close to NRD; fx at Performance (11.7 ms) looks close to
+  the game at Quality (15.6 ms). Motion (ghosting, disocclusion) is not tested yet.
+- `Developer/FeatureToggles/DLSSD` (the game's Ray Reconstruction path, `m_rayTracedReference_DLSSD_*` shaders) set to
+  1 changes nothing on macOS: NRD still runs, and the upscaler options are Off, FSR2, FSR3 and MetalFX only.
+
 ## Apple's denoised scaler: cost (`build/denoiser_bench`, 2026-10-08)
 
 `MTLFXTemporalDenoisedScaler` against the plain `MTLFXTemporalScaler`, M4 Max, idle GPU, game formats (color
@@ -129,6 +160,10 @@ specular hit distance), synchronous initialization, median of 200 frames:
 | 1728x1117 | 3456x2234 | 0.77 | 9.40 |
 | 2304x1489 | 3456x2234 | 1.13 | 15.01 |
 | 1920x1080 | 1920x1080 (denoise only) | 0.50 | 7.67 |
+
+Formats and options barely matter (8-bit guides, no hit distance, auto exposure: within 0.05 ms; the game's
+Depth32Float_Stencil8 depth adds 0.17 ms). Cost is about 3.2 ms per million input pixels plus 0.6 ms per million output
+pixels: 1.28 ms at 584x365 and 0.84 ms at 389x243 to 1168x730.
 
 The denoised scaler costs about 4.5 ms per million input pixels, roughly what NRD and its surrounding passes cost in
 RT Ultra (2.6-7.9 ms per million at 779x487) and less than in path tracing (4.5-9.8 ms per million). Replacing NRD and

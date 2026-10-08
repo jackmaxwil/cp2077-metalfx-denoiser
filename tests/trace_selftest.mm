@@ -9,7 +9,9 @@
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
+#include "Denoise.hpp"
 #include "MetalTrace.hpp"
 
 static const char* kSource = R"(
@@ -192,6 +194,60 @@ int main()
         const std::string perf = Slurp(dir + "/selftest.perf.json");
         if (perf.find("\"gpu_ms\":{\"median\":") == std::string::npos || perf.find("\"n\":0") != std::string::npos) {
             return Fail("perf output missing or empty");
+        }
+        // Denoise pass-through: a RELAX instance (pipelines labelled like the game's HitDistReconstruction and last
+        // a-trous pass) is dropped, and its two RGBA16Float inputs are copied to its two outputs.
+        {
+            MTLComputePipelineDescriptor* pd = [MTLComputePipelineDescriptor new];
+            pd.computeFunction = fn;
+            pd.label = @"2684890295";
+            id<MTLComputePipelineState> hitDist = [dev newComputePipelineStateWithDescriptor:pd
+                                                                                     options:MTLPipelineOptionNone
+                                                                                  reflection:nil
+                                                                                       error:&err];
+            pd.label = @"1807644384";
+            id<MTLComputePipelineState> atrous = [dev newComputePipelineStateWithDescriptor:pd
+                                                                                    options:MTLPipelineOptionNone
+                                                                                 reflection:nil
+                                                                                      error:&err];
+            MTLTextureDescriptor* ad = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                          width:8
+                                                                                         height:4
+                                                                                      mipmapped:NO];
+            ad.textureType = MTLTextureType2DArray;
+            ad.storageMode = MTLStorageModeShared;
+            ad.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> t[4];
+            for (int i = 0; i < 4; ++i) {
+                t[i] = [dev newTextureWithDescriptor:ad];
+                std::vector<__fp16> px(8 * 4 * 4, (__fp16)(i < 2 ? i + 1 : 0));
+                [t[i] replaceRegion:MTLRegionMake2D(0, 0, 8, 4) mipmapLevel:0 slice:0 withBytes:px.data()
+                        bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4];
+            }
+            Denoise::SetMode("pass");
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc useResources:t count:2 usage:MTLResourceUsageRead];
+            [enc setComputePipelineState:hitDist];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 4, 1)];
+            [enc useResources:t + 2 count:2 usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+            [enc setComputePipelineState:atrous];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 4, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            Denoise::SetMode("off");
+            __fp16 o[2][4];
+            for (int i = 0; i < 2; ++i) {
+                [t[2 + i] getBytes:o[i] bytesPerRow:8 * 8 bytesPerImage:8 * 8 * 4
+                         fromRegion:MTLRegionMake2D(7, 3, 1, 1) mipmapLevel:0 slice:0];
+            }
+            const bool lowFirst = t[0] < t[1], outLowFirst = t[2] < t[3]; // inputs and outputs pair by address
+            const float want0 = (lowFirst == outLowFirst) ? 1 : 2;
+            if ((float)o[0][0] != want0 || (float)o[1][0] != 3 - want0 || (float)o[0][3] != want0) {
+                std::fprintf(stderr, "denoise outputs %.1f %.1f\n", (float)o[0][0], (float)o[1][0]);
+                return Fail("denoise pass-through did not copy the inputs");
+            }
         }
         std::printf("PASS trace_selftest (%zu trace bytes)\n%s", trace.size(), perf.c_str());
         return 0;
