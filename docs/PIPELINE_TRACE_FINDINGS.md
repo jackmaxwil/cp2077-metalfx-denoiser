@@ -46,6 +46,25 @@ About half of the 180-frame windows were not steady: medians of 45-140 ms in eve
 everywhere. Causes seen: areas still streaming after a teleport, and other apps in use on the same GPU during the runs.
 Next: several windows per spot (report the best and the worst), runs on an otherwise idle Mac.
 
+## What the frame spends its time on (passcost, 2026-10-08)
+
+Skip test at the save's position with time frozen, MetalFX upscaling (779x487 to 1168x730), each part dropped in turn
+and measured twice (`scripts/passcost_report.py`, runs `RED4ext/runs/20261008-1000*-passcost`):
+
+| Part | RT Ultra (11.3 ms GPU) | Path tracing (17.1 ms GPU) |
+| --- | ---: | ---: |
+| Ray generation kernels (`rgs_*`) | 4.6 ms (41%) | 2.9 ms (17%) |
+| NRD REBLUR/RELAX/SIGMA (verified names only: lower bound) | 1.0 ms (9%) | 0.7 ms (4%) |
+| Acceleration structure refits (250-290 per frame) | 0.3-0.5 ms | 0.3 ms |
+| MetalFX temporal scaler | about 0.1 ms | about 0.1 ms |
+
+What this means for the goal:
+- Replacing NRD saves at most about 1 ms here. The FPS lever is the amount of ray tracing (4.6 ms in RT Ultra).
+- The denoiser swap pays the way DLSS Ray Reconstruction does: trace less (half resolution, fewer rays per pixel)
+  and let a better denoiser hide the extra noise. The settings for that exist (`CONFIG_VARS.md`:
+  `EnableHalfResolutionTracing`, path tracing `RayNumber`/`BounceNumber`).
+- Refits are cheap; the earlier worry about 350 acceleration structure operations per frame does not matter.
+
 ## Ray tracing workload (spot 0, RT Ultra)
 
 - Acceleration structures per frame: 312 BLAS refits, 36 BLAS builds, 2 TLAS builds (`MTLPrimitive` /
@@ -56,6 +75,7 @@ Next: several windows per spot (report the best and the worst), runs on an other
 - Path tracing is a wavefront tracer: `rgs_reference_wavefront_trace`, `rgs_reference_wavefront_shade`,
   `rgs_reference_wavefront_lightid_prefetch`, plus `rgs_reference_main` and the ReSTIR GI epilogue
   (`rgs_restirgi_spatiotemporal_epilogue`); 485 dispatches and 357 acceleration structure operations per frame.
+- With MetalFX selected and RT Ultra, the MetalFX scaler's motion input is RGBA16Float (RG16Float in the other runs).
 
 ## G-buffer and upscaler inputs (render resolution 779x487, output 1168x730)
 

@@ -30,12 +30,15 @@ What the tracing work settled:
 - **The baseline:** the upscaler option's index decides the upscaler (index 1 is MetalFX); all rtbench runs before
   2026-10-08 measured FSR3.
 
-What decides whether the swap pays in FPS: the GPU time of the NRD passes. Unknown until step 1 below.
+Measured (passcost, `PIPELINE_TRACE_FINDINGS.md`): NRD is about 1 ms of an 11.3 ms RT Ultra frame; ray generation is
+4.6 ms. The swap alone is a quality change; the FPS comes from tracing less (half resolution, fewer rays) with a
+denoiser good enough to hide it.
 
 ## Next steps
 
-1. **NRD cost:** skip the named NRD dispatches (tracer option) and measure the frame-time difference in RT Ultra and
-   path tracing. That is the most the swap can save (the image is noisy while skipped; it is a measurement).
+1. **Done: frame cost by part** (passcost): ray generation 41%, NRD 9%, refits under 5%, MetalFX 1% in RT Ultra.
+1b. **Ray budget settings:** test whether an ini file overrides the ray tracing settings (`EnableHalfResolutionTracing`,
+   `RayNumber`, `BounceNumber`), then measure ray generation cost and image quality per setting.
 2. **MetalFX baseline:** rtbench with MetalFX selected, on an idle Mac, several timing windows per spot.
 3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures (descriptor
    heap decoding, or one GPU capture read in Xcode).

@@ -11,8 +11,14 @@
 // - GPU capture: on request, one frame as an Xcode .gputrace document (needs MTL_CAPTURE_ENABLED=1 in the game's
 //   environment), for per-pass timing and resource views in Xcode.
 //
-// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>" or
-// "capture <name>". Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
+// - Skip test, to measure what work costs (the image is wrong while skipping): "skip listed" drops every compute
+//   dispatch of the pipelines whose shader library fingerprint is in <plugin dir>/skip-fingerprints.txt
+//   (scripts/skip_list.py, for example NRD's passes); "skip refit" drops acceleration structure refits (the structures
+//   go stale; builds are never dropped); "skip raygen" drops the ray generation kernels (function names rgs_*);
+//   "skip metalfx" drops the MetalFX temporal scaler's encode; "skip off".
+//
+// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
+// "capture <name>" or "skip listed|refit|raygen|metalfx|off". Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
 //
 // Built without ARC: hooks receive their arguments unretained, as the original methods do.
@@ -417,12 +423,23 @@ std::atomic<bool> s_sawCbPresent{false};
 
 struct Perf {
     std::string name;
+    uint64_t skippedAtStart = 0;
     uint64_t start = 0;
     uint64_t frames = 0;
     std::vector<double> present; // CPU time of each present in the window
     std::vector<std::vector<std::pair<double, double>>> gpu; // per frame: command buffer GPU intervals
 };
 std::atomic<bool> s_perfActive{false};
+
+// Skip test state: the pipelines to drop, and per thread the encoder and whether its bound pipeline is dropped.
+std::atomic<bool> s_skip{false};        // listed pipelines
+std::atomic<bool> s_skipRefit{false};
+std::atomic<bool> s_skipMetalFX{false};
+std::shared_mutex s_skipMutex;
+std::unordered_set<const void*> s_skipPipes;
+std::atomic<uint64_t> s_skipped{0};
+thread_local const void* t_enc = nullptr;
+thread_local bool t_drop = false;
 std::mutex s_perfMutex;
 Perf s_perf;
 
@@ -506,12 +523,49 @@ void WritePerf()
         span.push_back((maxE - iv[0].first) * 1000.0);
         count.push_back(static_cast<double>(iv.size()));
     }
-    std::string body = "{\"name\":" + Q(p.name.c_str()) + ",\"frames\":" + std::to_string(p.frames) +
+    const double skipped = static_cast<double>(s_skipped.load() - p.skippedAtStart) / std::max<double>(1, p.frames);
+    char skipBuf[64];
+    std::snprintf(skipBuf, sizeof(skipBuf), ",\"skipped_per_frame\":%.1f", skipped);
+    std::string body = "{\"name\":" + Q(p.name.c_str()) + ",\"frames\":" + std::to_string(p.frames) + skipBuf +
                        ",\"gpu_ms\":" + Stats(busy) + ",\"gpu_span_ms\":" + Stats(span) + ",\"cpu_frame_ms\":" +
                        Stats(cpu) + ",\"cmdbufs_per_frame\":" + Stats(count) + ",\"gpu_ms_list\":" + List(busy) +
                        ",\"cpu_frame_ms_list\":" + List(cpu) + "}\n";
     WriteFile(s_dir + "/" + p.name + ".perf.json", body);
     Logger::Info("Metal trace: wrote " + p.name + ".perf.json (" + std::to_string(busy.size()) + " frames)");
+}
+
+// Skips the listed fingerprints, or with raygen the ray generation kernels.
+void SetSkip(bool on, bool raygen = false)
+{
+    if (!on) {
+        s_skip.store(false);
+        Logger::Info("Metal trace: skip off");
+        return;
+    }
+    std::unordered_set<std::string> fps;
+    std::ifstream list(s_dir.substr(0, s_dir.find_last_of('/')) + "/skip-fingerprints.txt");
+    for (std::string line; std::getline(list, line);) {
+        if (!line.empty()) {
+            fps.insert(line);
+        }
+    }
+    std::unordered_set<const void*> pipes;
+    {
+        std::shared_lock<std::shared_mutex> lock(s_pipesMutex);
+        for (const auto& [pso, pipe] : s_pipes) {
+            const auto last = pipe.lib.substr(pipe.lib.find_last_of('|') + 1);
+            if (pipe.kind == 'c' && (raygen ? pipe.name.rfind("rgs_", 0) == 0 : fps.count(last) != 0)) {
+                pipes.insert(pso);
+            }
+        }
+    }
+    {
+        std::unique_lock<std::shared_mutex> lock(s_skipMutex);
+        s_skipPipes.swap(pipes);
+    }
+    s_skip.store(true);
+    Logger::Info("Metal trace: skip on, " + std::to_string(s_skipPipes.size()) + " pipelines from " +
+                 std::to_string(fps.size()) + " fingerprints");
 }
 
 void PollRequests(uint64_t frame)
@@ -540,6 +594,13 @@ void PollRequests(uint64_t frame)
     if (kind == "trace" && !name.empty()) {
         s_traceName = name;
         s_traceState.store(TraceState::Armed);
+    } else if (kind == "skip") {
+        SetSkip(name == "listed" || name == "raygen", name == "raygen");
+        s_skipRefit.store(name == "refit");
+        s_skipMetalFX.store(name == "metalfx");
+        if (name == "refit" || name == "metalfx") {
+            Logger::Info("Metal trace: skip " + name);
+        }
     } else if (kind == "capture" && !name.empty()) {
         s_traceName = name;
         s_traceState.store(TraceState::GpuArmed);
@@ -549,6 +610,7 @@ void PollRequests(uint64_t frame)
         s_perf.name = name;
         s_perf.frames = frames ? frames : 240;
         s_perf.start = frame + 1;
+        s_perf.skippedAtStart = s_skipped.load();
         s_perf.gpu.resize(s_perf.frames);
         s_perfActive.store(true);
     } else {
@@ -1145,6 +1207,11 @@ using Exec = void (*)(id, SEL, id, NSRange);
 
 void H_setCps(id self, SEL sel, id pso)
 {
+    if (s_skip.load(std::memory_order_relaxed)) {
+        std::shared_lock<std::shared_mutex> lock(s_skipMutex);
+        t_enc = (__bridge const void*)self;
+        t_drop = s_skipPipes.count((__bridge const void*)pso) != 0;
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lock(s_capMutex);
         Enc& e = EncOf(self);
@@ -1335,10 +1402,23 @@ void EmitDispatch(id self, const char* mode, MTLSize a, MTLSize b)
     Emit(line + "}");
 }
 
+// Skip test: true when this encoder's bound pipeline is one to drop.
+bool Dropped(id self)
+{
+    if (s_skip.load(std::memory_order_relaxed) && t_drop && t_enc == (__bridge const void*)self) {
+        s_skipped.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
+}
+
 void H_dispTG(id self, SEL sel, MTLSize groups, MTLSize threads)
 {
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "tg", groups, threads);
+    }
+    if (Dropped(self)) {
+        return;
     }
     ORIG(o_dispTG, Disp, self)(self, sel, groups, threads);
 }
@@ -1348,6 +1428,9 @@ void H_dispTh(id self, SEL sel, MTLSize grid, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "th", grid, threads);
     }
+    if (Dropped(self)) {
+        return;
+    }
     ORIG(o_dispTh, Disp, self)(self, sel, grid, threads);
 }
 
@@ -1355,6 +1438,9 @@ void H_dispInd(id self, SEL sel, id buffer, NSUInteger offset, MTLSize threads)
 {
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "ind", MTLSizeMake(0, 0, 0), threads);
+    }
+    if (Dropped(self)) {
+        return;
     }
     ORIG(o_dispInd, DispInd, self)(self, sel, buffer, offset, threads);
 }
@@ -1415,6 +1501,10 @@ void H_asBuild(id self, SEL sel, id as, id desc, id scratch, NSUInteger off)
 
 void H_asRefit(id self, SEL sel, id src, id desc, id dst, id scratch, NSUInteger off)
 {
+    if (s_skipRefit.load(std::memory_order_relaxed)) {
+        s_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitAs(self, "refit", desc);
     }
@@ -1423,6 +1513,10 @@ void H_asRefit(id self, SEL sel, id src, id desc, id dst, id scratch, NSUInteger
 
 void H_asRefitOpt(id self, SEL sel, id src, id desc, id dst, id scratch, NSUInteger off, NSUInteger opts)
 {
+    if (s_skipRefit.load(std::memory_order_relaxed)) {
+        s_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitAs(self, "refit", desc);
     }
@@ -1453,6 +1547,10 @@ std::string FxTex(const char* key, id<MTLTexture> t)
 
 void H_fxTemporalEncode(id self, SEL sel, id cb)
 {
+    if (s_skipMetalFX.load(std::memory_order_relaxed)) {
+        s_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (s_capture.load(std::memory_order_relaxed) || s_fxLogged.load() < 1) {
         id<MTLFXTemporalScaler> s = self;
         std::lock_guard<std::mutex> lock(s_capMutex);
