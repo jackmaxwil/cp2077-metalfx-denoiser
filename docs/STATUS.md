@@ -37,12 +37,13 @@ denoiser good enough to hide it.
 ## Next steps
 
 1. **Done: frame cost by part** (passcost): ray generation 41%, NRD 9%, refits under 5%, MetalFX 1% in RT Ultra.
-1b. **Ray budget settings:** test whether an ini file overrides the ray tracing settings (`EnableHalfResolutionTracing`,
-   `RayNumber`, `BounceNumber`), then measure ray generation cost and image quality per setting.
+1b. **Ray budget settings:** ini files do not override them (tested, `CONFIG_VARS.md`). Next: find the engine's config
+   variable registry (its set/get functions, verified in RED4ext's address DB) so a plugin can change them at runtime;
+   then measure ray generation cost and image quality per setting.
 2. **MetalFX baseline:** rtbench with MetalFX selected, on an idle Mac, several timing windows per spot.
 3. **Inputs:** map the G-buffer targets (normals, albedo, roughness) and the pre-denoise lighting textures (descriptor
    heap decoding, or one GPU capture read in Xcode).
 4. **Prototype:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
-5. **Settings in parallel:** test an ini override of the hidden settings (`CONFIG_VARS.md`: path tracing `RayNumber`,
-   `BounceNumber`, the Apple denoiser masks) and measure each with rtbench.
+5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path
+   tracing rays and bounces, the Apple denoiser masks) with passcost and rtbench.

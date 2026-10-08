@@ -18,6 +18,14 @@ by photo mode).
 
 Regenerate with `scripts/config_vars.py`.
 
+**Ini files do not change these settings** (tested 2026-10-08 with RED4ext's `CP_INI`, measured with passcost):
+`[RayTracing/Reference] RayNumber = 8` in `engine/config/platform/mac/zz_cp_autotest.ini` (path tracing),
+`[RayTracing/Diffuse] EnableHalfResolutionTracing` and `[Editor/Denoising/NRD] DebugSplitScreen` in
+`engine/config/platform/mac/user.ini`, and `[RayTracing/Debug] SkipStaticMeshes` plus
+`[RayTracing/NRD] UseReblurFor*Radiance` added to the game's own `engine/config/platform/mac/rendering.ini`
+(which it does read). None changed the ray generation cost, the NRD passes or the image. Changing them needs the
+engine's config variable registry at runtime (a RED4ext hook on a verified address), not a file.
+
 ## All groups
 
 ```
