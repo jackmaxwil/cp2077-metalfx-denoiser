@@ -14,6 +14,12 @@
 - RED4ext `tools/rtbench`: raster, RT Ultra, RT Psycho and path tracing at 5 spots, in the background. Findings and
   numbers: `PIPELINE_TRACE_FINDINGS.md`. Settings: `CONFIG_VARS.md`.
 
+## Goal (2026-10-08): path tracing that feels like 60 fps
+
+Path tracing at native 3456x2160 (fullscreen, M4 Max) at about 16.7 ms per rendered frame; frame interpolation only as
+smoothness on top. Starting point: about 50 ms (20 fps) with the Apple denoiser at MetalFX Performance. The plan is the
+"Path to 60" list at the end of this file.
+
 ## Where this stands against the goal
 
 Goal: more FPS and better image quality by replacing the game's denoisers (NRD REBLUR/RELAX/SIGMA) and its temporal
@@ -93,3 +99,43 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path
    tracing rays and bounces, the Apple denoiser masks) with passcost and rtbench.
+
+## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
+
+Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.
+
+0. **Measure at native resolution first.**
+   - Frame-time logger in the plugin (frame interval, GPU time, CPU encode time), written during normal play.
+   - CPU-bound check: if the CPU frame time is near 16.7 ms, GPU work cannot reach the goal; profile the main and
+     render threads.
+   - Per-part cost at native resolution (passcost: ray generation, ReSTIR GI, SHaRC, RTXDI, NRD leftovers, denoiser,
+     raster G-buffer, shadow maps, post-processing, volumetrics).
+   - Plugin overhead: no plugin, plugin with the denoiser off, denoiser on.
+   - Sustained performance: power adapter, High Power Mode, thermals over 10 minutes.
+1. **Cheap settings wins (hours, 5-20%).**
+   - Screen-space and raster effects that path tracing makes redundant, through the verified
+     `Developer/FeatureToggles/*` variables: screen-space reflections (the cinematic SSR runs in path tracing), SSAO,
+     contact shadows, GI probes and distant GI, cascade and local shadow maps. Image check for each.
+   - The rest of NRD in path tracing (SIGMA, REBLUR occlusion, input preparation, hit distance reconstruction): 3-10%.
+   - Crowd density and other CPU-side settings if step 0 shows CPU limits.
+2. **Render less (days, 20-40%).**
+   - A render scale below Performance, down to the denoiser's 3x (1152x720): the plugin sets the game's render size,
+     or the game's dynamic resolution (MetalFX "Dynamic", `DRS_TargetFPS`, min/max percentage) targets 60 fps. The
+     denoised scaler has no input content size, so dynamic resolution needs a fixed-size crop or a recreate.
+   - Denoise and upscale to a lower output (for example 2560x1600), then MetalFX's spatial scaler to 3456x2160: saves
+     the denoiser's output cost (about 0.6 ms per million output pixels, 2-3 ms here).
+   - Quality guardrails for each: motion, turn, skin and reference scenarios.
+3. **Trace less (days to weeks, unknown, possibly large).**
+   - Systematic sweep of the path tracing variables (rays per pixel, bounces, SHaRC, ReSTIR GI, RTXDI samples and light
+     counts, wavefront and SER options, ray tracing culling distances) with cvarbatch, timing and image error per
+     setting; earlier single tries showed no effect, so map which ones are live first.
+   - Half resolution for parts of the path tracer (indirect or specular), with the denoiser filling in.
+   - Acceleration structures: refits (0.3 ms), instance culling by distance.
+4. **Shader and GPU level (weeks).**
+   - Profile the wavefront tracing and shading kernels (occupancy, Metal Shader Converter bindless overhead,
+     alpha-tested geometry), from one GPU capture at native resolution.
+   - Metal 4 MetalFX (MTL4FX denoised scaler) cost check.
+5. **Smoothness on top (days).** MetalFX frame interpolation once the rendered frame rate is near 40-60, for 120 Hz
+   display smoothness (it does not improve responsiveness).
+6. **Keep it shippable.** Long-session soak (memory, stutter), the skin/motion/turn regression scenarios after each
+   change, ModMenu entries for the new options, fail-closed defaults.
