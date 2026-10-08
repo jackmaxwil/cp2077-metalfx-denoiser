@@ -52,6 +52,8 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    roughness; the in-game dump now writes every multi-target render pass). Left: specular hit distance and the noisy
    lighting, which compute passes write through the descriptor heap: dump the textures NRD's first passes read
    (their `useResource` reads), or decode the descriptor heap.
+   Done for NRD's own inputs (`PIPELINE_TRACE_FINDINGS.md`, "NRD's inputs"): the noisy diffuse and specular radiance
+   are half width checkerboards with hit distance in alpha; view Z and NRD's normal/roughness are known textures.
 3b. **NRD pass-through:** make NRD hand its noisy inputs to the composite (split screen at 1.0, or replacing the NRD
    dispatches with copies once their input and output textures are known), so the denoised scaler gets a noisy but
    complete image.

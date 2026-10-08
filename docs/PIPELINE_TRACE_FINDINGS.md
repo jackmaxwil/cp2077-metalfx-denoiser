@@ -98,6 +98,23 @@ What this means for the goal:
   (internal kernels `brnetv3_*`); "MetalFX" at index 3 runs FSR3 (`m_ffx_fsr3upscaler_*` passes). The rtbench runs of
   2026-10-07 therefore measured FSR3 upscaling; tools/rtbench now selects index 1.
 
+## NRD's inputs (tracer "dump" with dispatch textures, RT Ultra, `RED4ext/runs/20261008-121213-dump`)
+
+`RTBENCH_DUMP=<labels> RTBENCH_SCENARIO=dump tools/rtbench rt_ultra` writes the textures that chosen dispatches declare
+with `useResource` (read `-r`, written `-w`/`-rw`). For NRD's passes these declarations are exact (5-11 textures each):
+
+| Texture | Format | Contents | Seen in |
+| --- | --- | --- | --- |
+| noisy diffuse radiance | RGBA16Float 779x487 | RGB radiance, A normalized hit distance; **half width**: the left 390 columns hold a checkerboard (half resolution tracing) | `RELAX_Diffuse_PrePass` (2146613912) read |
+| noisy specular radiance | RGBA16Float 779x487 | the same layout, written by `rgs_reflection_opaque_main` (389 columns) | reflection ray generation write |
+| view Z | R32Float 779x487 | linear depth | `RELAX_Diffuse_PrePass` read |
+| normal and roughness | BGR10A2Unorm 779x487 | NRD's packed normal/roughness (not the G-buffer encoding) | every RELAX pass |
+| denoised diffuse / specular | RGBA16Float 779x487 | outputs of `RELAX_Diffuse_AtrousSmem` (610715217) and the last `RELAX_Specular_Atrous` (3863891985) | |
+
+The denoised outputs are not declared by any later dispatch: the passes that consume them reach them through
+`useHeap` or a render pass. Finding that consumer is the next step for an NRD pass-through (copy reconstructed noisy
+radiance into the denoised outputs and skip RELAX).
+
 ## Apple's denoised scaler: cost (`build/denoiser_bench`, 2026-10-08)
 
 `MTLFXTemporalDenoisedScaler` against the plain `MTLFXTemporalScaler`, M4 Max, idle GPU, game formats (color

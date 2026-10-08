@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
-// "capture <name>", "dump <name>" (trace plus PNGs of render targets, see s_dump), "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -356,6 +357,8 @@ struct Enc {
     uint32_t psoSets = 0;
     id cbObject = nil;               // dump frames only
     std::vector<id> renderTargets;   // dump frames only
+    std::vector<std::pair<id, NSUInteger>> uses;          // dump frames: textures declared since the last dispatch
+    std::vector<std::pair<id, std::string>> dispatchTex;  // dump frames: textures of dumped dispatches, written at end
 };
 
 std::atomic<bool> s_capture{false};
@@ -366,7 +369,11 @@ std::atomic<bool> s_capture{false};
 std::atomic<bool> s_dump{false};
 bool s_dumpRequested = false;
 int s_dumpCount = 0;
-constexpr int kMaxDumps = 128;
+constexpr int kMaxDumps = 256;
+// "dump <name> <a,b,...>" (or the list in <plugin dir>/dump-pipes.txt): also the textures each dispatch of these
+// pipelines declares (useResource), by pipeline label or function name, written when its encoder ends (inputs as they were unless the same encoder overwrites them later;
+// outputs as the encoder left them). Named <label>-r|w|rw.
+std::unordered_set<std::string> s_dumpPipes;
 std::mutex s_capMutex;
 std::vector<std::string> s_lines;
 std::unordered_map<const void*, Enc> s_enc;
@@ -750,9 +757,9 @@ void PollRequests(uint64_t frame)
     std::sort(reqs.begin(), reqs.end());
     const std::string path = s_dir + "/" + reqs[0];
     std::ifstream f(path);
-    std::string kind, name;
-    uint64_t frames = 0;
-    f >> kind >> name >> frames;
+    std::string kind, name, extra;
+    f >> kind >> name >> extra;
+    const uint64_t frames = std::strtoull(extra.c_str(), nullptr, 10);
     unlink(path.c_str());
     if (kind == "trace" && !name.empty()) {
         s_traceName = name;
@@ -775,6 +782,21 @@ void PollRequests(uint64_t frame)
         s_traceName = name;
         s_dumpName = name;
         s_dumpRequested = true;
+        s_dumpPipes.clear();
+        if (frames || extra.empty() || extra == "0") { // tools/cp-run passes a frame count: use dump-pipes.txt
+            std::ifstream list(s_dir.substr(0, s_dir.find_last_of('/')) + "/dump-pipes.txt");
+            std::getline(list, extra, '\0');
+        }
+        for (char& c : extra) {
+            c = (c == '\n' || c == ' ') ? ',' : c;
+        }
+        for (size_t at = 0; at < extra.size();) {
+            const size_t comma = std::min(extra.find(',', at), extra.size());
+            if (comma > at) {
+                s_dumpPipes.insert(extra.substr(at, comma - at));
+            }
+            at = comma + 1;
+        }
         s_traceState.store(TraceState::Armed);
     } else if (kind == "cvarbatch") {
         StartBatch(frame);
@@ -1636,6 +1658,9 @@ void NoteUse(id self, id const* res, NSUInteger count, NSUInteger usage)
         id r = res[i];
         if ([r respondsToSelector:@selector(pixelFormat)]) {
             NoteTexture(r);
+            if (s_dump.load() && !s_dumpPipes.empty()) {
+                EncOf(self).uses.emplace_back(r, usage);
+            }
         }
         line += (i ? "," : "") + P((__bridge const void*)r);
     }
@@ -1745,6 +1770,19 @@ void EmitDispatch(id self, const char* mode, MTLSize a, MTLSize b)
         line += ",\"grp\":" + Q(Groups(e.groups).c_str());
     }
     Emit(line + "}");
+    if (!e.uses.empty()) {
+        std::shared_lock<std::shared_mutex> pipes(s_pipesMutex);
+        auto it = s_pipes.find(e.pso);
+        if (it != s_pipes.end()) {
+            const std::string& key = s_dumpPipes.count(it->second.label) ? it->second.label : it->second.name;
+            if (s_dumpPipes.count(key)) {
+                for (const auto& [t, usage] : e.uses) {
+                    e.dispatchTex.emplace_back(t, key + (usage == 1 ? "-r" : usage == 2 ? "-w" : "-rw"));
+                }
+            }
+        }
+        e.uses.clear();
+    }
 }
 
 // Skip test: true when this encoder's bound pipeline is one to drop.
@@ -1804,6 +1842,7 @@ void H_endEnc(id self, SEL sel)
 {
     id dumpCb = nil;
     std::vector<id> dumpTargets;
+    std::vector<std::pair<id, std::string>> dumpDispatchTex;
     if (s_capture.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lock(s_capMutex);
         std::string line = "{\"e\":\"ee\"," + SeqField() + ",\"enc\":" + P((__bridge const void*)self);
@@ -1817,15 +1856,23 @@ void H_endEnc(id self, SEL sel)
                 dumpCb = it->second.cbObject;
                 dumpTargets = it->second.renderTargets;
             }
+            if (!it->second.dispatchTex.empty()) {
+                dumpCb = (__bridge id)it->second.cb;
+                dumpDispatchTex = std::move(it->second.dispatchTex);
+            }
             s_enc.erase(it);
         }
     }
     ORIG(o_endEnc, V0, self)(self, sel);
     if (dumpCb) {
-        Logger::Info("Metal trace: dump render pass with " + std::to_string(dumpTargets.size()) + " targets");
+        Logger::Info("Metal trace: dump encoder with " + std::to_string(dumpTargets.size()) + " render targets, " +
+                     std::to_string(dumpDispatchTex.size()) + " dispatch textures");
         std::lock_guard<std::mutex> lock(s_capMutex);
         for (size_t i = 0; i < dumpTargets.size(); ++i) {
             DumpTexture(dumpCb, dumpTargets[i], "rt" + std::to_string(i));
+        }
+        for (const auto& [t, what] : dumpDispatchTex) {
+            DumpTexture(dumpCb, t, what);
         }
     }
 }

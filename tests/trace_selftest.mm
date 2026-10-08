@@ -117,7 +117,7 @@ int main()
         rtd.pixelFormat = MTLPixelFormatBGR10A2Unorm;
         rtd.textureType = MTLTextureType2DArray; // like the game's render targets
         id<MTLTexture> rt1 = [dev newTextureWithDescriptor:rtd];
-        std::ofstream(dir + "/req-3") << "dump selftestdump\n";
+        std::ofstream(dir + "/req-3") << "dump selftestdump selftest_kernel\n";
         for (int frame = 0; frame < 20; ++frame) {
             @autoreleasepool {
                 id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -131,6 +131,14 @@ int main()
                 rp.colorAttachments[1].clearColor = MTLClearColorMake(0, 1, 0, 1);
                 rp.colorAttachments[1].storeAction = MTLStoreActionStore;
                 [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder]; // dispatch textures, by function name
+                [enc setComputePipelineState:c];
+                [enc useResource:in usage:MTLResourceUsageRead];
+                [enc useResource:out usage:MTLResourceUsageWrite];
+                [enc setTexture:in atIndex:0];
+                [enc setTexture:out atIndex:1];
+                [enc dispatchThreadgroups:MTLSizeMake(8, 4, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                [enc endEncoding];
                 id<CAMetalDrawable> drawable = [layer nextDrawable];
                 if (drawable) {
                     [cb presentDrawable:drawable];
@@ -141,7 +149,9 @@ int main()
         }
         sleep(1);
         if (access((dir + "/selftestdump-00-rt0-32x16-RGBA8Unorm.png").c_str(), F_OK) != 0 ||
-            access((dir + "/selftestdump-01-rt1-32x16-BGR10A2Unorm.png").c_str(), F_OK) != 0) {
+            access((dir + "/selftestdump-01-rt1-32x16-BGR10A2Unorm.png").c_str(), F_OK) != 0 ||
+            access((dir + "/selftestdump-02-selftest_kernel-r-64x32-RGBA16Float.png").c_str(), F_OK) != 0 ||
+            access((dir + "/selftestdump-03-selftest_kernel-w-64x32-RGBA16Float.png").c_str(), F_OK) != 0) {
             return Fail("dump PNGs missing");
         }
 
