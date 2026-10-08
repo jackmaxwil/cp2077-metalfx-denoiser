@@ -366,8 +366,8 @@ struct Enc {
     std::vector<id> useBufs;                                      // dump frames: buffers declared with useResource
 };
 
-// Buffers the game creates (address range, size, storage, frame), metadata only (never dereferenced): names the buffer
-// a root argument address points into when it is not bound or declared on the encoder.
+// The game's large shared heap buffers (address range, size, storage, frame created), retained: MapGpuAddress and the
+// dump's root argument decoding read through them.
 struct BufMeta {
     uint64_t len;
     NSUInteger storage;
@@ -892,6 +892,21 @@ void OnPresent(bool fromCommandBuffer)
         return; // the command buffer's presentDrawable: already counted this frame
     }
     const uint64_t frame = s_frame.fetch_add(1) + 1;
+    if (frame % 3600 == 0) { // about once a minute: the buffer registry's size, to catch growth
+        size_t kept = 0, keptBytes = 0, total = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_bufMutex);
+            total = s_bufs.size();
+            for (const auto& [va, m] : s_bufs) {
+                if (m.kept) {
+                    ++kept;
+                    keptBytes += m.len;
+                }
+            }
+        }
+        Logger::Info("Metal trace: frame " + std::to_string(frame) + ", buffers registered " + std::to_string(total) +
+                     ", kept " + std::to_string(kept) + " (" + std::to_string(keptBytes >> 20) + " MiB)");
+    }
 
     switch (s_traceState.load()) {
     case TraceState::Armed: {
@@ -1620,12 +1635,24 @@ void NoteBuffer(id buf, char from)
         return;
     }
     id<MTLBuffer> b = buf;
-    // Kept: large shared heap buffers (descriptor heaps, upload rings; few and long-lived; the heap owns the memory).
-    const bool keep = from == 'h' && b.storageMode == MTLStorageModeShared && b.length >= (16u << 20);
+    // Only large shared heap buffers (descriptor heaps, upload rings: a handful, long-lived; the heap owns the memory),
+    // retained so their contents stay readable. Recording every buffer grew without bound as the game streams (and
+    // slowed buffer creation, which runs under this lock), so nothing else is recorded.
+    if (from != 'h' || b.storageMode != MTLStorageModeShared || b.length < (16u << 20)) {
+        return;
+    }
+    const uint64_t va = b.gpuAddress, end = va + b.length;
     std::lock_guard<std::mutex> lock(s_bufMutex);
-    BufMeta& m = s_bufs[b.gpuAddress];
-    [m.kept release];
-    m = {b.length, b.storageMode, s_frame.load(), from, keep ? [buf retain] : nil};
+    // A new buffer over an old one's range: the old one is gone (its heap memory was reused); release it.
+    auto it = s_bufs.upper_bound(va);
+    if (it != s_bufs.begin() && std::prev(it)->first + std::prev(it)->second.len > va) {
+        --it;
+    }
+    while (it != s_bufs.end() && it->first < end) {
+        [it->second.kept release];
+        it = s_bufs.erase(it);
+    }
+    s_bufs[va] = {b.length, b.storageMode, s_frame.load(), from, [buf retain]};
 }
 
 id H_newBuf(id self, SEL sel, NSUInteger len, NSUInteger opts)

@@ -78,7 +78,12 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
    captures; the motion trigger and frozen-time teleports made frame-exact captures unreliable). Likely cause: at low
    frame rates each frame uncovers a wide band at the edge whose raw path traced signal is nearly black, and the stock
    denoiser hides it with RELAX's PrePass and HistoryFix. Path tracing now keeps RELAX's PrePass by default
-   (`denoiseprepass on|off`), as RT Ultra already did. Waiting for the player's check.
+   (`denoiseprepass on|off`), as RT Ultra already did. Player check (3456x2160, Performance): edges fixed.
+4d. **Fixed: stutter growing over minutes, a load that never finished.** The buffer registry recorded every buffer
+   the game created (metadata plus a lock on buffer creation) and grew without bound while streaming; with the
+   denoiser on from boot a load sat on the loading screen for 15 minutes, and a play session started stuttering after
+   two. It now records only the large shared heap buffers the camera read needs (2 buffers, 158 MiB, flat over 21,600
+   frames of rtbench; loads normally).
 4a. **Original plan:** create `MTLFXTemporalDenoisedScaler` where the game creates its MetalFX scaler, feed it the mapped
    textures, skip NRD; compare against step 2 (GPU time, flicker, screenshots).
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path
