@@ -420,6 +420,17 @@ bool Active()
     return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);
 }
 
+bool ViewToClip(float m[16])
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_cam.serial) {
+        return false;
+    }
+    const simd_float4x4 p = simd_mul(g_cam.worldToClip, g_cam.viewToWorld);
+    std::memcpy(m, &p, 64);
+    return true;
+}
+
 bool Projection(float& fovY, float& nearPlane, float& aspect)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

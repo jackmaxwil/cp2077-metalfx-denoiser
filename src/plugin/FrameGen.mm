@@ -17,11 +17,17 @@
 // reversed-Z with an infinite far plane, given here as a large finite one).
 //
 // HUD: generated frames take the HUD's pixels from the real frame (RestoreHud, the game's UI layer as mask).
+//
+// Frame warp (Warp.mm, when on and calibrated): the generated frame is re-aimed to the newest mouse input as it is
+// encoded; the game's frame is not presented from the game's command buffer but from a command buffer of our own
+// (FlushLate), encoded and committed shortly before its display time (the generated frame's display plus the hold), so
+// its re-aim uses the mouse input up to then.
 
 #include "FrameGen.hpp"
 #include "Denoise.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
+#include "Warp.hpp"
 
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
@@ -248,6 +254,51 @@ void NoteShown(id<MTLDrawable> d)
     }];
 }
 
+// The game's frame presented by the game at host time call: tells Warp when it was shown.
+void NoteLatency(id<MTLDrawable> d, double call)
+{
+    [d addPresentedHandler:^(id<MTLDrawable> drawable) {
+      Warp::FrameShown(call, drawable.presentedTime);
+    }];
+}
+
+// Frame warp's late present of the game's frame (see the header comment).
+struct Late {
+    id<CAMetalDrawable> drawable; // nil: nothing pending
+    id<MTLCommandQueue> queue;
+    double call = 0; // the game's present call
+};
+std::mutex g_lateMutex;
+Late g_late;
+id<MTLTexture> g_lateSrc, g_lateUi, g_lateOut, g_warpGen;
+dispatch_queue_t g_lateQueue = dispatch_queue_create(
+    "metalfx.late", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+
+// Re-aims and presents the pending game frame, at host time at (0: now).
+void FlushLate(double at)
+{
+    std::lock_guard<std::mutex> lock(g_lateMutex);
+    id<CAMetalDrawable> real = g_late.drawable;
+    if (!real) {
+        return;
+    }
+    g_late.drawable = nil;
+    MetalTrace::Internal internal;
+    id<MTLCommandBuffer> cb = [g_late.queue commandBuffer];
+    id<MTLTexture> shown = Warp::Encode(cb, g_lateSrc, g_lateSrc, g_lateUi, g_lateOut, 0.0) ? g_lateOut : g_lateSrc;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:shown toTexture:real.texture];
+    [blit endEncoding];
+    NoteShown(real);
+    NoteLatency(real, g_late.call);
+    if (at > CACurrentMediaTime() + 0.001) {
+        [cb presentDrawable:real atTime:at];
+    } else {
+        [cb presentDrawable:real];
+    }
+    [cb commit];
+}
+
 id<MTLTexture> Make(id<MTLDevice> d, MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage usage)
 {
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO];
@@ -464,6 +515,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                       layer.displaySyncEnabled ? 1 : 0, layer.drawableSize.width, layer.drawableSize.height);
         Logger::Info(buf);
     }
+    FlushLate(0); // a late frame still pending goes out before this one
     if (!Enabled() || !layer || !tex) {
         if (g_overlay) {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -523,6 +575,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         const double now = CACurrentMediaTime();
         const double dt = g_lastPresent > 0 ? std::min(0.1, now - g_lastPresent) : 1.0 / 30.0;
         g_lastPresent = now;
+        Warp::FramePresented(now);
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit copyFromTexture:tex toTexture:g_cur];
         [blit endEncoding];
@@ -535,6 +588,8 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         // A generated frame before it, when this frame has depth and motion and there is a previous frame.
         id<CAMetalDrawable> generated = nil;
+        bool late = false;        // frame warp: present the game's frame from FlushLate
+        id<MTLTexture> lateUi = nil;
         id<MTLTexture> genTex = g_out; // what the generated drawable shows (g_out, or a copy with the HUD restored)
         const bool fresh = g_inputsFrame == g_frame && g_depth;
         if (!fresh) {
@@ -647,7 +702,18 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
-                genTex = WithHud(cb, g_out, g_cur, g_useUi ? CurrentUi(g_frame) : nil);
+                id<MTLTexture> ui = g_useUi ? CurrentUi(g_frame) : nil;
+                genTex = WithHud(cb, g_out, g_cur, ui);
+                if (Warp::Ready()) { // re-aimed to the newest input; it shows the camera halfway from frame N-1
+                    if (!Fits(g_warpGen, tex)) {
+                        g_warpGen = Make(dev, tex.pixelFormat, tex.width, tex.height, colorUsage);
+                    }
+                    if (Warp::Encode(cb, genTex, g_cur, ui, g_warpGen, -0.5)) {
+                        genTex = g_warpGen;
+                    }
+                    late = true;
+                    lateUi = ui;
+                }
                 if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
                     const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
                     MetalTrace::SaveTexture(cb, genTex, base + "-gen");
@@ -662,7 +728,21 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         if (generated) {
             [blit copyFromTexture:genTex toTexture:generated.texture];
         }
-        [blit copyFromTexture:g_cur toTexture:real.texture];
+        if (late) { // our own copies: the late command buffer runs after the game moved on to its next frame
+            if (!Fits(g_lateSrc, tex)) {
+                g_lateSrc = Make(dev, tex.pixelFormat, tex.width, tex.height, colorUsage);
+                g_lateOut = Make(dev, tex.pixelFormat, tex.width, tex.height, colorUsage);
+            }
+            [blit copyFromTexture:g_cur toTexture:g_lateSrc];
+            if (lateUi) {
+                if (!Fits(g_lateUi, lateUi)) {
+                    g_lateUi = Make(dev, lateUi.pixelFormat, lateUi.width, lateUi.height, MTLTextureUsageShaderRead);
+                }
+                [blit copyFromTexture:lateUi toTexture:g_lateUi];
+            }
+        } else {
+            [blit copyFromTexture:g_cur toTexture:real.texture];
+        }
         [blit endEncoding];
         if (g_evalLeft.load() > 0) { // keep N-1 as the next frame's N-2
             if (!Fits(g_prev2, tex)) {
@@ -679,12 +759,35 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             g_reset = true;
         }
         lock.unlock();
-        if (generated) {
+        if (late) {
+            {
+                std::lock_guard<std::mutex> lateLock(g_lateMutex);
+                g_late.drawable = real;
+                g_late.queue = cb.commandQueue;
+                g_late.call = now;
+                if (!lateUi) {
+                    g_lateUi = nil;
+                }
+            }
+            const double hold = Hold(dt) + 0.001; // whole refreshes after the generated frame
+            [generated addPresentedHandler:^(id<MTLDrawable> shownGen) {
+              const double at = (shownGen.presentedTime > 0 ? shownGen.presentedTime : CACurrentMediaTime()) + hold;
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                           static_cast<int64_t>(std::max(0.0, at - 0.006 - CACurrentMediaTime()) * 1e9)),
+                             g_lateQueue, ^{
+                               FlushLate(at);
+                             });
+            }];
+            NoteShown(generated);
+            present(generated); // between the previous frame and this one; this frame follows from FlushLate
+        } else if (generated) {
             NoteShown(generated);
             NoteShown(real);
+            NoteLatency(real, now);
             present(generated);         // between the previous frame and this one
             presentAfter(real, Hold(dt)); // this frame about half a frame interval later
         } else {
+            NoteLatency(real, now);
             present(real);
         }
         return true;

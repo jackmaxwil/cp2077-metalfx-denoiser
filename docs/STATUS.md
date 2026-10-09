@@ -210,6 +210,22 @@ real frame (`WithHud`/`RestoreHud`; METALFX_FG_UI=0 turns it off). A compute pas
 lost its writes in the game (standalone it worked), hence the copy. Not yet verified: the last test run hung when the
 game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`).
 
+## Frame warp and game-thread input delay (2026-10-09, not yet tried in play)
+
+- Frame warp (Warp.mm, `frame_warp`, ModMenu): with frame generation, the generated frame is re-aimed to the newest
+  mouse input as it is encoded, and the game's frame is presented from a command buffer of the plugin's own, encoded
+  about 6 ms before its display time and re-aimed with the mouse input up to then. Rotation only (yaw about world z,
+  pitch about the camera's right axis), from NRD's gViewToWorld and projection; HUD pixels stay put. Raw mouse from
+  GCMouse on a queue of its own (attached only while warp is on); the game reads AppKit events on its main thread.
+- Calibration is live: per presented frame, camera yaw change against raw mouse movement shifted back by a latency; the
+  best fit gives the latency from mouse to present call and the sensitivity. Warp waits for a fit with R2 >= 0.6 and
+  stops below 0.4 (scripted cameras, vehicles).
+- Self-test: re-aim geometry against Metal's rasterizer (a square drawn from the turned camera: within 0.2 px, both view
+  handednesses), the latency fit (72 ms and sensitivity recovered), the late present path (frames re-aimed every frame).
+- Game-thread input delay (Input.mm, `game_input_delay_ms`, ModMenu): sleeps before the game's first event pump of each
+  frame (-[NSApplication nextEventMatchingMask:...] hook). The log line "Input lag" (about every 10 s) gives game input
+  read to present call, mouse event age at the read and the game frame time, to judge it.
+
 ## Input lag with frame generation (2026-10-09)
 
 - Frame queue limiter tried and dropped. A CPU-ahead limit at the presenting commit (wait for frame N-1's GPU end;

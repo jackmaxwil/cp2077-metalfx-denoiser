@@ -5,6 +5,8 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <cstdio>
+#include <simd/simd.h>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -13,6 +15,8 @@
 
 #include "Denoise.hpp"
 #include "FrameGen.hpp"
+#include "Input.hpp"
+#include "Warp.hpp"
 #import <MetalFX/MetalFX.h>
 #include "MetalTrace.hpp"
 
@@ -268,10 +272,21 @@ int main(int, char** argv)
             fd.pixelFormat = MTLPixelFormatRGBA8Unorm_sRGB;
             fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             id<MTLTexture> fui = [dev newTextureWithDescriptor:fd];
+            // Twice: plain, then with frame warp (a test camera and calibration, mouse movement every frame), where the
+            // game's frame is presented late from a command buffer of the plugin's own.
+            const float camV2w[16] = {0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1};
+            const float camP[16] = {0.866f, 0, 0, 0, 0, 1.732f, 0, 0, 0, 0, 0, 1, 0, 0, 0.1f, 0};
+            for (int pass = 0; pass < 2; ++pass) {
+            if (pass == 1) {
+                Warp::TestSetup(camV2w, camP, 0.0, 0.0005, 0.0005);
+                Warp::SetEnabled(true);
+            }
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
+            const auto warpsBefore = Warp::Encoded();
             for (int frame = 0; frame < 12; ++frame) {
                 @autoreleasepool {
+                    Input::InjectRaw(CACurrentMediaTime(), 20, 5);
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
                     MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
                     uiPass.colorAttachments[0].texture = fui;
@@ -293,9 +308,144 @@ int main(int, char** argv)
                 }
             }
             FrameGen::SetEnabled(false);
+            usleep(100000); // the last late frame
             if (FrameGen::Generated() - before < 8) {
                 std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
                 return Fail("frame generation produced no frames");
+            }
+            if (pass == 1 && Warp::Encoded() - warpsBefore < 8) {
+                std::fprintf(stderr, "warps %llu\n", Warp::Encoded() - warpsBefore);
+                return Fail("frame warp encoded nothing");
+            }
+            }
+            Warp::SetEnabled(false);
+        }
+
+        // Frame warp geometry, against Metal's own rasterizer: a square drawn from a camera, re-aimed by a yaw and pitch,
+        // lands where the square drawn from the turned camera is (both handednesses of view space). And the latency fit
+        // finds a known latency and sensitivity.
+        {
+            std::vector<double> t, d;
+            auto counts = [](double x) { return 1000 * std::sin(x * 3.0) + 400 * std::sin(x * 7.3); };
+            for (int i = 0; i <= 120; ++i) {
+                t.push_back(i * 0.0417);
+            }
+            for (int i = 0; i < 120; ++i) {
+                d.push_back(0.0005 * (counts(t[i + 1] - 0.072) - counts(t[i] - 0.072)));
+            }
+            double lat = 0, k = 0, r2 = 0;
+            if (!Warp::FitLatency(t, d, counts, lat, k, r2) || std::abs(lat - 0.072) > 0.003 ||
+                std::abs(k - 0.0005) > 1e-5 || r2 < 0.99) {
+                std::fprintf(stderr, "fit latency %.4f k %.6f r2 %.3f\n", lat, k, r2);
+                return Fail("frame warp latency fit");
+            }
+
+            static const char* squareSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+vertex float4 sq_vs(uint id [[vertex_id]], constant float4* pts [[buffer(0)]], constant float4x4& vp [[buffer(1)]])
+{ return vp * pts[id]; }
+fragment float4 sq_fs() { return float4(1.0); }
+)";
+            NSError* sqErr = nil;
+            id<MTLLibrary> sqLib = [dev newLibraryWithSource:@(squareSource) options:nil error:&sqErr];
+            MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor new] autorelease];
+            rpd.vertexFunction = [sqLib newFunctionWithName:@"sq_vs"];
+            rpd.fragmentFunction = [sqLib newFunctionWithName:@"sq_fs"];
+            rpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+            id<MTLRenderPipelineState> sq = [dev newRenderPipelineStateWithDescriptor:rpd error:&sqErr];
+            if (!sq) {
+                return Fail("square pipeline");
+            }
+            const int W = 256, H = 128;
+            MTLTextureDescriptor* wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                          width:W
+                                                                                         height:H
+                                                                                      mipmapped:NO];
+            wd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> src = [dev newTextureWithDescriptor:wd], ref = [dev newTextureWithDescriptor:wd],
+                           out = [dev newTextureWithDescriptor:wd];
+            const simd_float4x4 P = {{{0.866f, 0, 0, 0}, {0, 1.732f, 0, 0}, {0, 0, 0, 1}, {0, 0, 0.1f, 0}}};
+            auto draw = [&](id<MTLCommandBuffer> cb, id<MTLTexture> target, simd_float3x3 R, const simd_float4* pts) {
+                const simd_float3x3 Rt = simd_transpose(R);
+                const simd_float4x4 view = {{simd_make_float4(Rt.columns[0], 0), simd_make_float4(Rt.columns[1], 0),
+                                             simd_make_float4(Rt.columns[2], 0), {0, 0, 0, 1}}};
+                const simd_float4x4 vp = simd_mul(P, view);
+                MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = target;
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+                [re setRenderPipelineState:sq];
+                [re setVertexBytes:pts length:6 * sizeof(simd_float4) atIndex:0];
+                [re setVertexBytes:&vp length:sizeof(vp) atIndex:1];
+                [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [re endEncoding];
+            };
+            id<MTLBuffer> rb = [dev newBufferWithLength:W * H * 8 options:MTLResourceStorageModeShared];
+            auto centroid = [&](id<MTLTexture> tex, double& cx, double& cy) {
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                [b copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                         sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * 8
+                    destinationBytesPerImage:W * H * 8];
+                [b endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                const __fp16* px = static_cast<const __fp16*>(rb.contents);
+                double sum = 0;
+                cx = cy = 0;
+                for (int y = 0; y < H; ++y) {
+                    for (int x = 0; x < W; ++x) {
+                        const double v = px[(y * W + x) * 4];
+                        sum += v;
+                        cx += v * (x + 0.5);
+                        cy += v * (y + 0.5);
+                    }
+                }
+                cx /= std::max(sum, 1e-9);
+                cy /= std::max(sum, 1e-9);
+                return sum > 1;
+            };
+            for (int hand = 0; hand < 2; ++hand) {
+                // View x right, y up, z forward; world z up, forward +x.
+                const simd_float3 fwd = {1, 0, 0}, up = {0, 0, 1}, right = {0, hand ? -1.0f : 1.0f, 0};
+                const simd_float3x3 R = simd_matrix(right, up, fwd);
+                const simd_float3 c = fwd * 10 + right * 1.0f + up * 0.5f;
+                const simd_float4 pts[6] = {simd_make_float4(c - right * 0.3f - up * 0.3f, 1),
+                                            simd_make_float4(c + right * 0.3f - up * 0.3f, 1),
+                                            simd_make_float4(c + right * 0.3f + up * 0.3f, 1),
+                                            simd_make_float4(c - right * 0.3f - up * 0.3f, 1),
+                                            simd_make_float4(c + right * 0.3f + up * 0.3f, 1),
+                                            simd_make_float4(c - right * 0.3f + up * 0.3f, 1)};
+                const double yaw = 0.06, pitch = 0.04;
+                // The turned camera as Warp builds it: yaw about world z, pitch about the camera's right axis with the
+                // sign that raises asin(forward.z).
+                auto rot = [](simd_float3 axis, float a) { return simd_matrix3x3(simd_quaternion(a, axis)); };
+                const double raise = std::asin(simd_mul(rot(right, 1e-3f), fwd).z) - std::asin(fwd.z);
+                const simd_float3x3 A = simd_mul(rot(simd_make_float3(0, 0, 1), yaw),
+                                                 rot(right, (raise < 0 ? -1.0f : 1.0f) * static_cast<float>(pitch)));
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                draw(cb, src, R, pts);
+                draw(cb, ref, simd_mul(A, R), pts);
+                float r9[9], p16[16];
+                std::memcpy(r9, &R.columns[0], 12);
+                std::memcpy(r9 + 3, &R.columns[1], 12);
+                std::memcpy(r9 + 6, &R.columns[2], 12);
+                std::memcpy(p16, &P, 64);
+                Warp::EncodeWith(cb, src, nil, nil, out, r9, p16, yaw, pitch);
+                [cb commit];
+                [cb waitUntilCompleted];
+                double sx, sy, rx, ry, ox, oy;
+                if (!centroid(src, sx, sy) || !centroid(ref, rx, ry) || !centroid(out, ox, oy)) {
+                    return Fail("frame warp: square not drawn");
+                }
+                std::fprintf(stderr, "warp (%s view): square at %.1f,%.1f; turned camera %.1f,%.1f; re-aimed %.1f,%.1f\n",
+                             hand ? "left-handed" : "right-handed", sx, sy, rx, ry, ox, oy);
+                if (std::hypot(ox - rx, oy - ry) > 1.0 || std::hypot(sx - rx, sy - ry) < 5.0) {
+                    return Fail("frame warp geometry");
+                }
             }
         }
 

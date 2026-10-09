@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "profile <name>" (trace plus GPU time per encoder), "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "framegen on|off" (FrameGen.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "framegen on|off" (FrameGen.mm), "warp on|off" (Warp.mm), "gamedelay <ms>" (Input.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -32,6 +32,8 @@
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
 #include "FrameGen.hpp"
+#include "Input.hpp"
+#include "Warp.hpp"
 #include "Logger.hpp"
 
 #import <Metal/Metal.h>
@@ -945,6 +947,10 @@ void PollRequests(uint64_t frame)
         if (!ConfigVars::SetUltraScale(std::strtof(name.c_str(), nullptr), why)) {
             Logger::Warn("Metal trace: ultrascale " + name + ": " + why);
         }
+    } else if (kind == "warp") {
+        Warp::SetEnabled(name == "on");
+    } else if (kind == "gamedelay") {
+        Input::SetGameDelay(std::strtod(name.c_str(), nullptr) / 1000.0);
     } else if (kind == "sharpen") {
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
@@ -1819,6 +1825,10 @@ void H_cbCommit(id self, SEL sel)
 
 void H_cbPresent(id self, SEL sel, id drawable)
 {
+    if (t_internal) { // the plugin's own presents (FrameGen's late frames)
+        ORIG(o_cbPresent, V1, self)(self, sel, drawable);
+        return;
+    }
     OnPresent(true);
     // Frame generation presents a generated frame and then the game's (FrameGen.mm), through the original methods.
     if (FrameGen::Present(
@@ -1833,12 +1843,20 @@ void H_cbPresent(id self, SEL sel, id drawable)
 
 void H_cbPresentAt(id self, SEL sel, id drawable, CFTimeInterval t)
 {
+    if (t_internal) {
+        ORIG(o_cbPresentAt, V1T, self)(self, sel, drawable, t);
+        return;
+    }
     OnPresent(true);
     ORIG(o_cbPresentAt, V1T, self)(self, sel, drawable, t);
 }
 
 void H_cbPresentAfter(id self, SEL sel, id drawable, CFTimeInterval t)
 {
+    if (t_internal) {
+        ORIG(o_cbPresentAfter, V1T, self)(self, sel, drawable, t);
+        return;
+    }
     OnPresent(true);
     ORIG(o_cbPresentAfter, V1T, self)(self, sel, drawable, t);
 }
