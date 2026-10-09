@@ -86,7 +86,6 @@ target_link_libraries(MetalFXDenoiser PRIVATE
     "-framework CoreGraphics"
     "-framework Foundation"
     "-framework AppKit"
-    "-framework GameController"
 )
 
 set_target_properties(MetalFXDenoiser PROPERTIES
@@ -127,7 +126,6 @@ target_link_libraries(trace_selftest PRIVATE
     "-framework QuartzCore"
     "-framework Foundation"
     "-framework AppKit"
-    "-framework GameController"
 )
 
 # Denoised scaler cost at the game's sizes (not installed): ./build/denoiser_bench [frames]

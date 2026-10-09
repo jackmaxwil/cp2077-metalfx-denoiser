@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <deque>
 #include <mutex>
 
@@ -72,8 +74,13 @@ bool g_live = false;
 size_t g_count = 0;
 // Calibration: latency from moving the mouse to the game's present call, sensitivity (radians per count).
 bool g_cal = false;
-double g_lat = 0, g_kx = 0, g_ky = 0, g_r2 = 0, g_gameLat = 0, g_gameR2 = 0;
+double g_lat = 0, g_kx = 0, g_ky = 0, g_r2 = 0;
 std::vector<double> g_shown;
+// METALFX_WARP_RECORD=<prefix>: per presented frame, the camera, to <prefix>-frames.csv (research).
+FILE* g_record = [] {
+    const char* prefix = std::getenv("METALFX_WARP_RECORD");
+    return prefix && *prefix ? std::fopen((std::string(prefix) + "-frames.csv").c_str(), "w") : nullptr;
+}();
 bool g_test = false;
 float g_testV2w[16], g_testP[16];
 
@@ -130,7 +137,7 @@ void Calibrate()
     auto raw = [](int axis) {
         return [axis](double at) {
             double x, y;
-            return Input::Counts(at, x, y) ? (axis ? y : x) : NAN;
+            return Input::GameCounts(at, x, y) ? (axis ? y : x) : NAN;
         };
     };
     double lat, k, r2;
@@ -157,14 +164,6 @@ void Calibrate()
             g_cal = false; // the camera turns without the mouse (vehicle, scripted camera, cutscene)
         }
     }
-    auto game = [](double at) {
-        double x, y;
-        return Input::GameCounts(at, x, y) ? x : NAN;
-    };
-    if (Warp::FitLatency(t, dyaw, game, lat, k, r2)) {
-        g_gameLat = lat;
-        g_gameR2 = r2;
-    }
 }
 
 void Log() // caller holds g_mutex
@@ -172,12 +171,11 @@ void Log() // caller holds g_mutex
     const Input::PumpStats pump = Input::TakePumpStats();
     char buf[500];
     std::snprintf(buf, sizeof(buf),
-                  "Input lag: mouse to present call %.0f ms (fit R2 %.2f), game input read to present call %.0f ms "
-                  "(R2 %.2f), mouse event age at the read %.1f ms, game frame %.1f ms (%zu), present call to display "
-                  "%.1f ms; frame warp %s (%.4f, %.4f mrad per count), game-thread delay %.0f ms",
-                  g_lat * 1000, g_r2, g_gameLat * 1000, g_gameR2, pump.eventAgeMs, pump.frameMs, pump.bursts,
-                  Median(g_shown), !g_enabled.load() ? "off" : g_cal ? "on" : "waiting for a fit", g_kx * 1000,
-                  g_ky * 1000, Input::GameDelay() * 1000);
+                  "Input lag: game input read to present call %.0f ms (fit R2 %.2f), mouse event age at the read %.1f "
+                  "ms, game frame %.1f ms (%zu), present call to display %.1f ms; frame warp %s (%.4f, %.4f mrad per "
+                  "count)",
+                  g_lat * 1000, g_r2, pump.eventAgeMs, pump.frameMs, pump.bursts, Median(g_shown),
+                  !g_enabled.load() ? "off" : g_cal ? "on" : "waiting for a fit", g_kx * 1000, g_ky * 1000);
     Logger::Info(buf);
     g_shown.clear();
 }
@@ -191,7 +189,6 @@ void SetEnabled(bool on)
     if (g_enabled.exchange(on) != on) {
         Logger::Info(std::string("Warp: frame warp ") + (on ? "on" : "off"));
     }
-    Input::SetRaw(on);
 }
 
 bool Enabled()
@@ -260,6 +257,14 @@ void FramePresented(double t)
         return;
     }
     g_serial = serial;
+    if (g_record) {
+        std::fprintf(g_record, "%.6f,%llu", t, static_cast<unsigned long long>(serial));
+        for (int i = 0; i < 12; ++i) {
+            std::fprintf(g_record, ",%.6f", v2w[i]);
+        }
+        std::fprintf(g_record, ",%.6f,%.6f,%.6f,%.6f\n", p[0], p[5], p[8], p[9]);
+        std::fflush(g_record);
+    }
     Frame f;
     f.t = t;
     f.R = simd_matrix(simd_make_float3(v2w[0], v2w[1], v2w[2]), simd_make_float3(v2w[4], v2w[5], v2w[6]),
@@ -323,7 +328,7 @@ bool Encode(id commandBuffer, id src, id cur, id ui, id dst, double phase)
         ky = g_ky;
     }
     double x0, y0, x1, y1;
-    if (!Input::Counts(f.t - lat, x0, y0) || !Input::Counts(CACurrentMediaTime(), x1, y1)) {
+    if (!Input::GameCounts(f.t - lat, x0, y0) || !Input::GameCounts(CACurrentMediaTime(), x1, y1)) {
         return false;
     }
     // The turn from src's camera to the newest input's: the movement the frame does not show yet, plus (for a

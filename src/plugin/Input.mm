@@ -1,16 +1,17 @@
 #import "Input.hpp"
 
 #import <AppKit/AppKit.h>
-#import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <vector>
-#include <unistd.h>
 
 #include "Logger.hpp"
 
@@ -21,33 +22,24 @@ struct Sample {
 };
 
 std::mutex g_mutex; // everything below except the pump state (main thread only)
-std::deque<Sample> g_raw, g_game;
-double g_rawX = 0, g_rawY = 0, g_gameX = 0, g_gameY = 0;
+std::deque<Sample> g_game;
+double g_gameX = 0, g_gameY = 0;
 std::vector<double> g_bursts, g_ages;
-std::atomic<double> g_delay{0};
-dispatch_queue_t g_mouseQueue;
 
 double g_lastPump = 0, g_burstStart = 0; // main thread
+// METALFX_WARP_RECORD=<prefix>: the game's mouse events as the pump takes them, to <prefix>-events.csv (research).
+FILE* g_record = [] {
+    const char* prefix = std::getenv("METALFX_WARP_RECORD");
+    return prefix && *prefix ? std::fopen((std::string(prefix) + "-events.csv").c_str(), "w") : nullptr;
+}();
 
 // Keeps eight seconds, and the sample before them (the movement up to the window's start).
-void Push(std::deque<Sample>& q, double t, double x, double y)
+void Push(double t, double x, double y) // caller holds g_mutex
 {
-    q.push_back({t, x, y});
-    while (q.size() >= 2 && t - q[1].t > 8.0) {
-        q.pop_front();
+    g_game.push_back({t, x, y});
+    while (g_game.size() >= 2 && t - g_game[1].t > 8.0) {
+        g_game.pop_front();
     }
-}
-
-bool At(const std::deque<Sample>& q, double t, double& x, double& y)
-{
-    if (q.empty() || t < q.front().t) {
-        return false;
-    }
-    auto it = std::upper_bound(q.begin(), q.end(), t, [](double v, const Sample& s) { return v < s.t; });
-    --it; // the last sample at or before t
-    x = it->x;
-    y = it->y;
-    return true;
 }
 
 double Median(std::vector<double> v)
@@ -66,11 +58,8 @@ NSEvent* H_next(id self, SEL sel, NSEventMask mask, NSDate* until, NSRunLoopMode
 {
     const double now = CACurrentMediaTime();
     if (now - g_lastPump > 0.004) { // the first pump of a burst: the game starts reading input for a frame
-        if (const double d = g_delay.load(); d > 0) {
-            usleep(static_cast<useconds_t>(d * 1e6));
-        }
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_burstStart > 0) {
+        if (g_burstStart > 0 && g_bursts.size() < 100000) {
             g_bursts.push_back((now - g_burstStart) * 1000.0);
         }
         g_burstStart = now;
@@ -85,29 +74,17 @@ NSEvent* H_next(id self, SEL sel, NSEventMask mask, NSDate* until, NSRunLoopMode
             std::lock_guard<std::mutex> lock(g_mutex);
             g_gameX += ev.deltaX;
             g_gameY += ev.deltaY;
-            Push(g_game, after, g_gameX, g_gameY);
+            Push(after, g_gameX, g_gameY);
             if (g_ages.size() < 100000) {
                 g_ages.push_back((after - ev.timestamp) * 1000.0);
+            }
+            if (g_record) {
+                std::fprintf(g_record, "%.6f,%.6f,%.3f,%.3f\n", after, ev.timestamp, g_gameX, g_gameY);
+                std::fflush(g_record);
             }
         }
     }
     return ev;
-}
-
-std::atomic<bool> g_rawOn{false};
-
-void Attach(GCMouse* mouse) // main thread
-{
-    if (!g_rawOn.load()) {
-        mouse.mouseInput.mouseMovedHandler = nil;
-        return;
-    }
-    mouse.handlerQueue = g_mouseQueue;
-    mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput*, float dx, float dy) {
-      Input::InjectRaw(CACurrentMediaTime(), dx, dy);
-    };
-    Logger::Info(std::string("Input: GCMouse attached (") + (mouse.vendorName ? mouse.vendorName.UTF8String : "mouse") +
-                 ")");
 }
 
 } // namespace
@@ -120,9 +97,6 @@ void Start()
     if (started.exchange(true)) {
         return;
     }
-    g_mouseQueue = dispatch_queue_create("metalfx.mouse",
-                                         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-                                                                                 QOS_CLASS_USER_INTERACTIVE, 0));
     dispatch_async(dispatch_get_main_queue(), ^{
       Method m = class_getInstanceMethod([NSApplication class],
                                          @selector(nextEventMatchingMask:untilDate:inMode:dequeue:));
@@ -131,53 +105,20 @@ void Start()
       }
       Logger::Info(std::string("Input: event pump hook ") + (o_next ? "installed" : "unavailable") + " (app class " +
                    (NSApp ? class_getName([NSApp class]) : "none") + ")");
-      [[NSNotificationCenter defaultCenter] addObserverForName:GCMouseDidConnectNotification
-                                                        object:nil
-                                                         queue:[NSOperationQueue mainQueue]
-                                                    usingBlock:^(NSNotification* note) {
-                                                      Attach(note.object);
-                                                    }];
     });
-}
-
-void SetRaw(bool on)
-{
-    if (g_rawOn.exchange(on) == on) {
-        return;
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-      for (GCMouse* mouse in GCMouse.mice) {
-          Attach(mouse);
-      }
-      if (!on) {
-          Logger::Info("Input: GCMouse detached");
-      }
-    });
-}
-
-bool Counts(double t, double& x, double& y)
-{
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return At(g_raw, t, x, y);
 }
 
 bool GameCounts(double t, double& x, double& y)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    return At(g_game, t, x, y);
-}
-
-void SetGameDelay(double seconds)
-{
-    seconds = std::clamp(seconds, 0.0, 0.05);
-    if (g_delay.exchange(seconds) != seconds) {
-        Logger::Info("Input: game-thread delay " + std::to_string(static_cast<int>(seconds * 1000 + 0.5)) + " ms");
+    if (g_game.empty() || t < g_game.front().t) {
+        return false;
     }
-}
-
-double GameDelay()
-{
-    return g_delay.load();
+    auto it = std::upper_bound(g_game.begin(), g_game.end(), t, [](double v, const Sample& s) { return v < s.t; });
+    --it; // the last sample at or before t
+    x = it->x;
+    y = it->y;
+    return true;
 }
 
 PumpStats TakePumpStats()
@@ -189,12 +130,12 @@ PumpStats TakePumpStats()
     return s;
 }
 
-void InjectRaw(double t, double dx, double dy)
+void InjectGame(double t, double dx, double dy)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_rawX += dx;
-    g_rawY += dy;
-    Push(g_raw, t, g_rawX, g_rawY);
+    g_gameX += dx;
+    g_gameY += dy;
+    Push(t, g_gameX, g_gameY);
 }
 
 } // namespace Input

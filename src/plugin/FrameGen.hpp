@@ -7,6 +7,11 @@ namespace FrameGen {
 
 void SetEnabled(bool on);
 bool Enabled();
+// Hold of the game's frame after the generated one: half the frame interval (true), or that rounded down to whole
+// display refreshes (false, the default). Request "fghold half|floor".
+void SetHoldHalf(bool on);
+// Request "warpdump <n>": the next n re-aimed game frames as PNGs with the game's next frame (wd<i>-src, -warp, -next).
+void WarpDump(int frames);
 // Generated frames presented since start.
 unsigned long long Generated();
 // Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate

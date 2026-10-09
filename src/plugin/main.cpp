@@ -92,11 +92,6 @@ void OnFrameWarpToggle(const ModMenuEntryPath*, bool on)
     Warp::SetEnabled(on);
 }
 
-void OnGameDelayChanged(const ModMenuEntryPath*, float value)
-{
-    Input::SetGameDelay(value / 1000.0);
-}
-
 void OnUltraScaleChanged(const ModMenuEntryPath*, float value)
 {
     s_ultraScale.store(value);
@@ -160,7 +155,6 @@ bool Initialize()
     if (denoiser) {
         Input::Start();
         Warp::SetEnabled(config.frameWarp);
-        Input::SetGameDelay(config.gameInputDelayMs / 1000.0);
         // ModMenu calls ModMenu_Register itself if it loaded first; otherwise register here.
         using GetApi = const ModMenuApi* (*)();
         if (auto getApi = reinterpret_cast<GetApi>(dlsym(RTLD_DEFAULT, "ModMenu_GetApi"))) {
@@ -229,13 +223,6 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                     .title = {"Frame warp: re-aim frames to the newest mouse input (frame generation)"},
                                     .defaultValue = Warp::Enabled(),
                                     .onChanged = &MetalFXDenoiser::OnFrameWarpToggle};
-    const ModMenuSliderInfo gameDelay = {.entryId = {"game_input_delay_ms"},
-                                         .title = {"Game-thread input delay, ms (0 = off; see the log's input lag line)"},
-                                         .minValue = 0.0f,
-                                         .maxValue = 30.0f,
-                                         .step = 2.0f,
-                                         .defaultValue = Config::Get().gameInputDelayMs,
-                                         .onChanged = &MetalFXDenoiser::OnGameDelayChanged};
     const ModMenuToggleInfo noisy = {.entryId = {"noisy_lighting"},
                                      .title = {"Debug: noisy lighting (no denoiser)"},
                                      .defaultValue = MetalFXDenoiser::s_noisy.load(),
@@ -247,7 +234,6 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                     api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
                     api->RegisterSlider("MetalFXDenoiser", "main", &sharpness) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &warp) &&
-                    api->RegisterSlider("MetalFXDenoiser", "main", &gameDelay) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");
     return ok;

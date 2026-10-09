@@ -102,6 +102,8 @@ kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
 )";
 id<MTLComputePipelineState> g_hud;
 id<MTLTexture> g_hudOut; // the generated frame with the HUD restored
+std::atomic<bool> g_holdHalf{false}; // request "fghold half": the old hold, exactly half the frame interval
+uint64_t g_hudRestored = 0; // generated frames with the HUD restored (WithHud found a UI layer), per Count window
 id<MTLTexture> Make(id<MTLDevice> d, MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage usage);
 bool Fits(id<MTLTexture> t, id<MTLTexture> like);
 
@@ -162,6 +164,7 @@ id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTextur
     [blit copyFromTexture:gen toTexture:g_hudOut];
     [blit endEncoding];
     RestoreHud(cb, g_hudOut, cur, ui);
+    ++g_hudRestored;
     return g_hudOut;
 }
 
@@ -214,12 +217,14 @@ void Count(int why)
     }
     if (total % 240 == 0) {
         char buf[200];
-        std::snprintf(buf, sizeof(buf), "FrameGen: last 240 presents: %llu generated, %llu stale inputs, %llu no previous, "
-                      "%llu no drawable, %llu framebuffer only", (unsigned long long)g_why[4],
+        std::snprintf(buf, sizeof(buf), "FrameGen: last 240 presents: %llu generated (%llu with the HUD restored), %llu stale "
+                      "inputs, %llu no previous, %llu no drawable, %llu framebuffer only", (unsigned long long)g_why[4],
+                      (unsigned long long)g_hudRestored,
                       (unsigned long long)g_why[1], (unsigned long long)g_why[2], (unsigned long long)g_why[3],
                       (unsigned long long)g_why[0]);
         Logger::Info(buf);
         std::fill(std::begin(g_why), std::end(g_why), 0);
+        g_hudRestored = 0;
     }
 }
 std::atomic<int> g_logged{0};
@@ -270,6 +275,9 @@ struct Late {
 };
 std::mutex g_lateMutex;
 Late g_late;
+// Request "warpdump <n>": the next n re-aimed game frames as PNGs (wd<i>-src, wd<i>-warp) with the game's next frame
+// (wd<i>-next), to check the re-aim against where the camera went.
+std::atomic<int> g_warpDump{0}, g_warpDumpIndex{0}, g_warpDumpNext{-1};
 id<MTLTexture> g_lateSrc, g_lateUi, g_lateOut, g_warpGen;
 dispatch_queue_t g_lateQueue = dispatch_queue_create(
     "metalfx.late", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
@@ -286,6 +294,13 @@ void FlushLate(double at)
     MetalTrace::Internal internal;
     id<MTLCommandBuffer> cb = [g_late.queue commandBuffer];
     id<MTLTexture> shown = Warp::Encode(cb, g_lateSrc, g_lateSrc, g_lateUi, g_lateOut, 0.0) ? g_lateOut : g_lateSrc;
+    if (shown == g_lateOut && g_warpDump.load() > 0 && g_warpDumpNext.load() < 0) {
+        g_warpDump.fetch_sub(1);
+        const int i = g_warpDumpIndex.fetch_add(1);
+        MetalTrace::SaveTexture(cb, g_lateSrc, "wd" + std::to_string(i) + "-src");
+        MetalTrace::SaveTexture(cb, g_lateOut, "wd" + std::to_string(i) + "-warp");
+        g_warpDumpNext.store(i);
+    }
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:shown toTexture:real.texture];
     [blit endEncoding];
@@ -351,6 +366,17 @@ void Evaluate(int samples)
     g_evalWarm = 0;
     g_evalInterp = nil;
     Logger::Info("FrameGen: evaluating " + std::to_string(samples) + " samples");
+}
+
+void WarpDump(int frames)
+{
+    g_warpDump.store(frames);
+}
+
+void SetHoldHalf(bool on)
+{
+    g_holdHalf.store(on);
+    Logger::Info(std::string("FrameGen: hold ") + (on ? "half the frame interval" : "rounded down to refreshes"));
 }
 
 void SetEnabled(bool on)
@@ -426,6 +452,9 @@ std::atomic<double> g_refresh{1.0 / 120.0}; // the display's refresh interval (S
 // sooner.
 double Hold(double dt)
 {
+    if (g_holdHalf.load()) {
+        return dt / 2;
+    }
     const double r = g_refresh.load();
     return std::max(1.0, std::floor(dt / 2 / r + 0.05)) * r - 0.001;
 }
@@ -579,6 +608,9 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit copyFromTexture:tex toTexture:g_cur];
         [blit endEncoding];
+        if (const int i = g_warpDumpNext.exchange(-1); i >= 0) {
+            MetalTrace::SaveTexture(cb, g_cur, "wd" + std::to_string(i) + "-next");
+        }
 
         // The game's frame through the overlay; its own drawable goes back to its pool unpresented.
         id<CAMetalDrawable> real = OverlayDrawable();

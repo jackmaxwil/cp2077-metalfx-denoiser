@@ -2,27 +2,19 @@
 
 #include <cstddef>
 
-// Mouse input and the game's event pump (Input.mm). The game reads the mouse from AppKit events, which its main thread
-// takes off the event queue once per game frame; GameController's GCMouse reports the same movement on a queue of our
-// own as it happens, which is what frame warp (Warp.mm) needs. The pump hook also times the game's frames and can delay
-// the game's input read (the game-thread delay: if the game thread reads input earlier than it needs to, waiting
-// before the read makes the input it uses fresher).
+// The game's mouse input (Input.mm). The game reads the mouse from AppKit events, which its main thread takes off the
+// event queue once per game frame (-[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:], hooked here), about
+// 10 ms before it presents that frame. Frame warp (Warp.mm) uses these deltas: the game turns the camera by exactly
+// 0.873 mrad per count of them (measured, docs/STATUS.md), and the main thread keeps reading them while the GPU still
+// works on earlier frames.
 namespace Input {
 
-// Swizzles -[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:] (main thread).
+// Swizzles the event pump (main thread).
 void Start();
-// Raw mouse movement from GCMouse on or off (frame warp turns it on; off detaches, in case it disturbs the game's own
-// mouse events).
-void SetRaw(bool on);
 
-// Cumulative mouse movement at host time t (CACurrentMediaTime), from the last eight seconds: raw (GCMouse, as it
-// happens) and as the game took it (AppKit event deltas, at the pump). False when t is outside the record.
-bool Counts(double t, double& x, double& y);
+// Cumulative mouse movement as the game took it, at host time t (CACurrentMediaTime), from the last eight seconds;
+// false when t is outside the record.
 bool GameCounts(double t, double& x, double& y);
-
-// Wait this long (seconds, 0 = off) before the first event pump of each game frame.
-void SetGameDelay(double seconds);
-double GameDelay();
 
 // Medians since the last call: the time between the game's pump bursts (its frame time) and how old mouse events were
 // when the pump took them.
@@ -32,7 +24,7 @@ struct PumpStats {
 };
 PumpStats TakePumpStats();
 
-// Tests: adds raw mouse movement at host time t, as GCMouse would.
-void InjectRaw(double t, double dx, double dy);
+// Tests: mouse movement taken at host time t, as the pump would record it.
+void InjectGame(double t, double dx, double dy);
 
 } // namespace Input

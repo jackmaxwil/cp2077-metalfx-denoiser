@@ -286,7 +286,7 @@ int main(int, char** argv)
             const auto warpsBefore = Warp::Encoded();
             for (int frame = 0; frame < 12; ++frame) {
                 @autoreleasepool {
-                    Input::InjectRaw(CACurrentMediaTime(), 20, 5);
+                    Input::InjectGame(CACurrentMediaTime(), 20, 5);
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
                     MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
                     uiPass.colorAttachments[0].texture = fui;

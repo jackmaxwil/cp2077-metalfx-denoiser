@@ -28,12 +28,9 @@ ultra_scale = 3.0
 
 # Frame warp (with frame generation): re-aims each shown frame to the newest mouse input just before it is shown, so
 # turning shows up without waiting for the game to render it. Rotation only; the edges a turn reveals repeat the frame's
-# border pixels. Calibrates itself while you turn with the mouse (the log's "Input lag" line). Also in ModMenu.
+# border pixels. Uses the game's own mouse input and calibrates itself while you turn (the log's "Input lag" line).
+# Also in ModMenu.
 frame_warp = false
-
-# Wait this many milliseconds (0-30) before the game reads input each frame. Helps only if the game thread reads input
-# earlier than it needs to: lower "game input read to present call" in the log at the same frame rate. Also in ModMenu.
-game_input_delay_ms = 0
 
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.

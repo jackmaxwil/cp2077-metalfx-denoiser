@@ -10,9 +10,11 @@
 // movement since the frame's input read adds; the edges the turn reveals repeat the frame's border pixels, and the HUD
 // stays where the game drew it.
 //
-// Calibration, live: per presented frame, the camera's yaw and pitch change against the raw mouse movement (Input.mm)
-// over the same interval shifted back by a latency L; the L that fits best (least squares, no intercept) is the time
-// from moving the mouse to the game presenting a frame that shows it, and the fit's slope is the game's sensitivity.
+// Calibration, live: per presented frame, the camera's yaw and pitch change against the game's mouse movement
+// (Input.mm) over the same interval shifted back by a latency L; the L that fits best (least squares, no intercept) is
+// the time from the game reading the mouse to presenting a frame that shows it, and the fit's slope is the game's
+// sensitivity. The newest movement comes from the game's main thread, which keeps reading input while the GPU renders
+// and shows earlier frames.
 // Warp runs only while the fit is good (gameplay; not menus, vehicles' scripted cameras or cutscenes).
 namespace Warp {
 

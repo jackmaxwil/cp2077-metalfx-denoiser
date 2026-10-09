@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "profile <name>" (trace plus GPU time per encoder), "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "framegen on|off" (FrameGen.mm), "warp on|off" (Warp.mm), "gamedelay <ms>" (Input.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "framegen on|off" (FrameGen.mm), "warp on|off" (Warp.mm), "fghold half|floor" (FrameGen.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -32,7 +32,6 @@
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
 #include "FrameGen.hpp"
-#include "Input.hpp"
 #include "Warp.hpp"
 #include "Logger.hpp"
 
@@ -947,10 +946,12 @@ void PollRequests(uint64_t frame)
         if (!ConfigVars::SetUltraScale(std::strtof(name.c_str(), nullptr), why)) {
             Logger::Warn("Metal trace: ultrascale " + name + ": " + why);
         }
+    } else if (kind == "warpdump") {
+        FrameGen::WarpDump(std::atoi(name.c_str()));
+    } else if (kind == "fghold") {
+        FrameGen::SetHoldHalf(name == "half");
     } else if (kind == "warp") {
         Warp::SetEnabled(name == "on");
-    } else if (kind == "gamedelay") {
-        Input::SetGameDelay(std::strtod(name.c_str(), nullptr) / 1000.0);
     } else if (kind == "sharpen") {
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
