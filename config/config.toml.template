@@ -11,5 +11,9 @@ enabled = true
 # Show the noisy lighting (NRD off, no denoiser): for comparisons only.
 noisy_lighting = false
 
+# Frame time log: a 120-frame timing window every N frames (0 = off), one "Perf play-..." line each in the game's
+# output (frame time, fps, GPU busy time, and whether the GPU or the CPU limits the frame rate).
+log_performance = 600
+
 # Metal tracer for research (pipeline names, frame traces, timings); METALFX_TRACE=1 does the same.
 trace_metal_compute = false

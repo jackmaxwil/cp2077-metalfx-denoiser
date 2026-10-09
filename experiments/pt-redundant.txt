@@ -1,0 +1,18 @@
+# Raster and screen-space features path tracing may make redundant (Developer/FeatureToggles, bools, valid values
+# 0/1 only). Each is set to 0, timed and photographed, then restored. Run at native resolution with the denoiser on:
+# CP_RESOLUTION=3456x2160 RTBENCH_PRESET=Performance@3 RTBENCH_DENOISE=fx RTBENCH_SCENARIO=cvarbatch \
+#   RTBENCH_EXPERIMENTS=../cp2077-metalfx-denoiser/experiments/pt-redundant.txt tools/rtbench pt
+Developer/FeatureToggles/ScreenSpaceReflection=0
+Developer/FeatureToggles/ScreenSpacePlanarReflection=0
+Developer/FeatureToggles/SSAO=0
+Developer/FeatureToggles/ContactShadows=0
+Developer/FeatureToggles/GlobalIllumination=0
+Developer/FeatureToggles/DistantGI=0
+Developer/FeatureToggles/CascadeShadows=0
+Developer/FeatureToggles/LocalShadows=0
+Developer/FeatureToggles/DistantShadows=0
+Developer/FeatureToggles/CharacterLightBlockers=0
+Developer/FeatureToggles/VolumetricClouds=0
+Developer/FeatureToggles/VolumetricFog=0
+Developer/FeatureToggles/DistantVolFog=0
+Developer/FeatureToggles/RainMap=0

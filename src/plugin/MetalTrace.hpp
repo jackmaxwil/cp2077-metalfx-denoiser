@@ -14,6 +14,10 @@ bool Install();
 // Restores the original implementation.
 void Uninstall();
 
+// A 120-frame timing window every everyFrames frames, logged as one "Perf play-<frame>" line (0: off; the
+// METALFX_PERF_EVERY environment variable wins).
+void LogPerformance(uint64_t everyFrames);
+
 // The CPU address of a GPU address inside one of the game's large shared heap buffers (registered at creation), if
 // len bytes from there are inside it; nullptr otherwise.
 const uint8_t* MapGpuAddress(uint64_t gpuAddress, size_t len);

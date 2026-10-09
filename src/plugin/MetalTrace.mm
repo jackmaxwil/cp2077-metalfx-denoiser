@@ -20,7 +20,7 @@
 // - Startup settings: <plugin dir>/cvar-startup.txt ("<group>/<name>=<value>" per line) is applied at the first frame
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
-// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "perf <name> <frames>",
+// Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "profile <name>" (trace plus GPU time per encoder), "perf <name> <frames>",
 // "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
@@ -47,6 +47,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <mach/mach_time.h>
+#include <type_traits>
 #include <map>
 #include <cstdlib>
 #include <atomic>
@@ -480,6 +482,7 @@ struct Perf {
     std::vector<std::vector<std::pair<double, double>>> gpu; // per frame: command buffer GPU intervals
 };
 std::atomic<bool> s_perfActive{false};
+uint64_t s_perfEvery = 0; // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
 // The window being recorded. Each window has its own buffer: command buffers of its last frames complete after the
 // window ends, while the next window may already be recording.
 std::shared_ptr<struct Perf> s_perfCur;
@@ -583,6 +586,17 @@ void WritePerf(std::shared_ptr<Perf> window)
                        ",\"cpu_frame_ms_list\":" + List(cpu) + "}\n";
     WriteFile(s_dir + "/" + p.name + ".perf.json", body);
     Logger::Info("Metal trace: wrote " + p.name + ".perf.json (" + std::to_string(busy.size()) + " frames)");
+    // One line for play sessions: the GPU's share of the frame says what limits it (GPU busy close to the frame time:
+    // the GPU; well below it: the CPU, or waiting on something).
+    if (!cpu.empty() && !busy.empty()) {
+        const double frameMs = Percentile(cpu, 0.5), gpuMs = Percentile(busy, 0.5);
+        char line[300];
+        std::snprintf(line, sizeof(line),
+                      "Perf %s: frame %.1f ms (%.0f fps; p95 %.1f ms), GPU busy %.1f ms (p95 %.1f), %s-bound",
+                      p.name.c_str(), frameMs, 1000.0 / frameMs, Percentile(cpu, 0.95), gpuMs, Percentile(busy, 0.95),
+                      gpuMs >= 0.85 * frameMs ? "GPU" : "CPU");
+        Logger::Info(line);
+    }
 }
 
 // Skips the listed fingerprints, or with raygen the ray generation kernels.
@@ -617,6 +631,81 @@ void SetSkip(bool on, bool raygen = false)
     s_skip.store(true);
     Logger::Info("Metal trace: skip on, " + std::to_string(s_skipPipes.size()) + " pipelines from " +
                  std::to_string(fps.size()) + " fingerprints");
+}
+
+// --- GPU timestamps per encoder ("profile <name>") ----------------------------------------------------------------
+// A traced frame whose encoders also sample the GPU timestamp counter at their start and end (stage boundary
+// sampling, which Apple GPUs support): encoders created without a descriptor are created with one carrying the
+// sample buffer attachment; descriptors the game passes get the attachment for the call. The trace's encoder lines
+// carry "ts":<index> (start sample; end is index + 1); <name>.ts.json has the resolved timestamps and the CPU/GPU
+// clock calibration. scripts/gpu_profile.py turns them into GPU time per pass.
+std::atomic<bool> s_prof{false};
+bool s_profRequested = false;
+id<MTLCounterSampleBuffer> s_profBuf = nil;
+std::atomic<uint32_t> s_profNext{0};
+constexpr uint32_t kProfSamples = 4096; // the most a sample buffer holds (32 KiB); a frame has about 200 encoders
+uint64_t s_profResolveAt = 0, s_profCpu0 = 0, s_profGpu0 = 0;
+std::string s_profName;
+thread_local int t_profIdx = -1;
+
+bool ProfReady()
+{
+    if (s_profBuf) {
+        return true;
+    }
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); // the game's device: one GPU, one device object
+    if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+        Logger::Warn("Metal trace: no stage boundary counter sampling on this GPU");
+        return false;
+    }
+    for (id<MTLCounterSet> set in dev.counterSets) {
+        if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+            MTLCounterSampleBufferDescriptor* d = [[MTLCounterSampleBufferDescriptor new] autorelease];
+            d.counterSet = set;
+            d.storageMode = MTLStorageModeShared;
+            d.sampleCount = kProfSamples;
+            NSError* error = nil;
+            s_profBuf = [dev newCounterSampleBufferWithDescriptor:d error:&error];
+        }
+    }
+    if (!s_profBuf) {
+        Logger::Warn("Metal trace: no timestamp counter sample buffer");
+    }
+    return s_profBuf != nil;
+}
+
+// The first sample index for a new encoder in a profiled frame, or -1. Compute, blit and acceleration structure
+// encoders take 2 (start, end), render passes 4 (vertex start and end, fragment start and end: on a tile-based GPU the
+// vertex stage can start long before the fragment stage runs).
+int ProfTake(uint32_t n = 2)
+{
+    if (!s_prof.load(std::memory_order_relaxed)) {
+        return -1;
+    }
+    const uint32_t i = s_profNext.fetch_add(n);
+    return i + n <= kProfSamples ? static_cast<int>(i) : -1;
+}
+
+void WriteProfile()
+{
+    const uint32_t n = std::min(s_profNext.load(), kProfSamples);
+    NSData* data = n ? [s_profBuf resolveCounterRange:NSMakeRange(0, n)] : nil;
+    MTLTimestamp cpu1 = 0, gpu1 = 0;
+    [s_profBuf.device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    std::string body = "{\"name\":" + Q(s_profName.c_str()) + ",\"cpu0\":" + std::to_string(s_profCpu0) +
+                       ",\"gpu0\":" + std::to_string(s_profGpu0) + ",\"cpu1\":" + std::to_string(cpu1) +
+                       ",\"gpu1\":" + std::to_string(gpu1) + ",\"timebase\":[" + std::to_string(tb.numer) + "," +
+                       std::to_string(tb.denom) + "],\"samples\":[";
+    const auto* t = data ? static_cast<const MTLCounterResultTimestamp*>(data.bytes) : nullptr;
+    const size_t count = data ? data.length / sizeof(MTLCounterResultTimestamp) : 0;
+    for (size_t i = 0; i < count; ++i) {
+        body += (i ? "," : "") + (t[i].timestamp == MTLCounterErrorValue ? std::string("null") :
+                                  std::to_string(t[i].timestamp));
+    }
+    WriteFile(s_dir + "/" + s_profName + ".ts.json", body + "]}\n");
+    Logger::Info("Metal trace: wrote " + s_profName + ".ts.json (" + std::to_string(count / 2) + " encoders)");
 }
 
 void StartPerf(const std::string& name, uint64_t frames, uint64_t frame)
@@ -781,8 +870,9 @@ void PollRequests(uint64_t frame)
     f >> kind >> name >> extra;
     const uint64_t frames = std::strtoull(extra.c_str(), nullptr, 10);
     unlink(path.c_str());
-    if (kind == "trace" && !name.empty()) {
+    if ((kind == "trace" || kind == "profile") && !name.empty()) {
         s_traceName = name;
+        s_profRequested = kind == "profile" && ProfReady();
         s_traceState.store(TraceState::Armed);
     } else if (kind == "cvar" && !name.empty()) {
         std::ofstream(s_dir + "/cvar.jsonl", std::ios::app) << ConfigVars::Apply(name) << '\n';
@@ -892,6 +982,13 @@ void OnPresent(bool fromCommandBuffer)
         return; // the command buffer's presentDrawable: already counted this frame
     }
     const uint64_t frame = s_frame.fetch_add(1) + 1;
+    if (s_profResolveAt && frame >= s_profResolveAt) {
+        s_profResolveAt = 0;
+        WriteProfile();
+    }
+    if (s_perfEvery && frame % s_perfEvery == 0 && !s_perfActive.load()) {
+        StartPerf("play-" + std::to_string(frame), 120, frame); // [debug] log_performance: a timing window every N frames
+    }
     if (frame % 3600 == 0) { // about once a minute: the buffer registry's size, to catch growth
         size_t kept = 0, keptBytes = 0, total = 0;
         {
@@ -924,11 +1021,21 @@ void OnPresent(bool fromCommandBuffer)
         s_lines.emplace_back(buf);
         s_dumpCount = 0;
         s_dump.store(s_dumpRequested);
+        if (s_profRequested) {
+            s_profNext.store(0);
+            s_profName = s_traceName;
+            [s_profBuf.device sampleTimestamps:&s_profCpu0 gpuTimestamp:&s_profGpu0];
+            s_prof.store(true);
+        }
         s_capture.store(true);
         s_traceState.store(TraceState::Capturing);
         break;
     }
     case TraceState::Capturing:
+        if (s_prof.exchange(false)) {
+            s_profRequested = false;
+            s_profResolveAt = frame + 30; // the frame's command buffers have completed by then
+        }
         s_capture.store(false);
         s_dump.store(false);
         s_dumpRequested = false;
@@ -1416,6 +1523,9 @@ void BeginEncoder(id cb, id enc, char kind, int dispatchType, MTLRenderPassDescr
     e.kind = kind;
     std::string line = "{\"e\":\"eb\"," + SeqField() + ",\"enc\":" + P((__bridge const void*)enc) +
                        ",\"cb\":" + P((__bridge const void*)cb) + ",\"kind\":\"" + std::string(1, kind) + "\"";
+    if (t_profIdx >= 0) {
+        line += ",\"ts\":" + std::to_string(t_profIdx);
+    }
     if (dispatchType >= 0) {
         line += ",\"concurrent\":" + std::to_string(dispatchType);
     }
@@ -1437,45 +1547,101 @@ void BeginEncoder(id cb, id enc, char kind, int dispatchType, MTLRenderPassDescr
     Emit(line + "}");
 }
 
+// Profiled frames: a compute encoder made through a descriptor with the timestamp attachment.
+id ProfCompute(id cb, NSUInteger type, int idx)
+{
+    MTLComputePassDescriptor* pd = [MTLComputePassDescriptor computePassDescriptor];
+    pd.dispatchType = static_cast<MTLDispatchType>(type);
+    pd.sampleBufferAttachments[0].sampleBuffer = s_profBuf;
+    pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = idx;
+    pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = idx + 1;
+    return ORIG(o_cbComputeDesc, Id1, cb)(cb, @selector(computeCommandEncoderWithDescriptor:), pd);
+}
+
 id H_cbCompute(id self, SEL sel)
 {
-    id enc = ORIG(o_cbCompute, Id0, self)(self, sel);
+    const int idx = ProfTake();
+    id enc = idx >= 0 ? ProfCompute(self, MTLDispatchTypeSerial, idx) : ORIG(o_cbCompute, Id0, self)(self, sel);
+    t_profIdx = idx;
     BeginEncoder(self, enc, 'c', 0, nil);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbComputeType(id self, SEL sel, NSUInteger type)
 {
-    id enc = ORIG(o_cbComputeType, IdU, self)(self, sel, type);
+    const int idx = ProfTake();
+    id enc = idx >= 0 ? ProfCompute(self, type, idx) : ORIG(o_cbComputeType, IdU, self)(self, sel, type);
+    t_profIdx = idx;
     BeginEncoder(self, enc, 'c', type == MTLDispatchTypeConcurrent ? 1 : 0, nil);
+    t_profIdx = -1;
     return enc;
 }
 
+// Profiled frames: the game's pass descriptor carries the timestamp attachment for this call only.
+template <class Desc> struct ProfAttach {
+    Desc* desc;
+    int idx;
+    ProfAttach(Desc* d, bool render) : desc(d), idx(ProfTake(render ? 4 : 2))
+    {
+        if (idx < 0) {
+            return;
+        }
+        auto a = desc.sampleBufferAttachments[0];
+        a.sampleBuffer = s_profBuf;
+        if constexpr (std::is_same_v<Desc, MTLRenderPassDescriptor>) {
+            a.startOfVertexSampleIndex = idx;
+            a.endOfVertexSampleIndex = idx + 1;
+            a.startOfFragmentSampleIndex = idx + 2;
+            a.endOfFragmentSampleIndex = idx + 3;
+        } else {
+            a.startOfEncoderSampleIndex = idx;
+            a.endOfEncoderSampleIndex = idx + 1;
+        }
+        (void)render;
+    }
+    ~ProfAttach()
+    {
+        if (idx >= 0) {
+            desc.sampleBufferAttachments[0].sampleBuffer = nil;
+        }
+    }
+};
+
 id H_cbComputeDesc(id self, SEL sel, id desc)
 {
+    ProfAttach<MTLComputePassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbComputeDesc, Id1, self)(self, sel, desc);
+    t_profIdx = prof.idx;
     BeginEncoder(self, enc, 'c', [(MTLComputePassDescriptor*)desc dispatchType] == MTLDispatchTypeConcurrent ? 1 : 0,
                  nil);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbRender(id self, SEL sel, id desc)
 {
+    ProfAttach<MTLRenderPassDescriptor> prof(desc, true);
     id enc = ORIG(o_cbRender, Id1, self)(self, sel, desc);
+    t_profIdx = prof.idx;
     if (Denoise::Active()) {
         Denoise::RenderPass(desc);
     }
     BeginEncoder(self, enc, 'r', -1, desc);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbParallel(id self, SEL sel, id desc)
 {
+    ProfAttach<MTLRenderPassDescriptor> prof(desc, true);
     id enc = ORIG(o_cbParallel, Id1, self)(self, sel, desc);
+    t_profIdx = prof.idx;
     if (Denoise::Active()) {
         Denoise::RenderPass(desc);
     }
     BeginEncoder(self, enc, 'p', -1, desc);
+    t_profIdx = -1;
     return enc;
 }
 
@@ -1497,29 +1663,60 @@ id H_parSub(id self, SEL sel)
 
 id H_cbBlit(id self, SEL sel)
 {
-    id enc = ORIG(o_cbBlit, Id0, self)(self, sel);
+    const int idx = ProfTake();
+    id enc;
+    if (idx >= 0) {
+        MTLBlitPassDescriptor* pd = [MTLBlitPassDescriptor blitPassDescriptor];
+        pd.sampleBufferAttachments[0].sampleBuffer = s_profBuf;
+        pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = idx;
+        pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = idx + 1;
+        enc = ORIG(o_cbBlitDesc, Id1, self)(self, @selector(blitCommandEncoderWithDescriptor:), pd);
+    } else {
+        enc = ORIG(o_cbBlit, Id0, self)(self, sel);
+    }
+    t_profIdx = idx;
     BeginEncoder(self, enc, 'b', -1, nil);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbBlitDesc(id self, SEL sel, id desc)
 {
+    ProfAttach<MTLBlitPassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbBlitDesc, Id1, self)(self, sel, desc);
+    t_profIdx = prof.idx;
     BeginEncoder(self, enc, 'b', -1, nil);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbAccel(id self, SEL sel)
 {
-    id enc = ORIG(o_cbAccel, Id0, self)(self, sel);
+    const int idx = ProfTake();
+    id enc;
+    if (idx >= 0) {
+        MTLAccelerationStructurePassDescriptor* pd = [MTLAccelerationStructurePassDescriptor
+            accelerationStructurePassDescriptor];
+        pd.sampleBufferAttachments[0].sampleBuffer = s_profBuf;
+        pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = idx;
+        pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = idx + 1;
+        enc = ORIG(o_cbAccelDesc, Id1, self)(self, @selector(accelerationStructureCommandEncoderWithDescriptor:), pd);
+    } else {
+        enc = ORIG(o_cbAccel, Id0, self)(self, sel);
+    }
+    t_profIdx = idx;
     BeginEncoder(self, enc, 'a', -1, nil);
+    t_profIdx = -1;
     return enc;
 }
 
 id H_cbAccelDesc(id self, SEL sel, id desc)
 {
+    ProfAttach<MTLAccelerationStructurePassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbAccelDesc, Id1, self)(self, sel, desc);
+    t_profIdx = prof.idx;
     BeginEncoder(self, enc, 'a', -1, nil);
+    t_profIdx = -1;
     return enc;
 }
 
@@ -2435,6 +2632,9 @@ bool Install()
     if (const char* r = std::getenv("METALFX_TRACE_REFLECTION")) {
         s_reflection = r[0] != '0';
     }
+    if (const char* n = std::getenv("METALFX_PERF_EVERY"); n && *n) {
+        s_perfEvery = std::strtoull(n, nullptr, 10);
+    }
     if (const char* m = std::getenv("METALFX_DENOISE"); m && *m) {
         Denoise::SetMode(m);
     }
@@ -2631,6 +2831,13 @@ bool Install()
     Logger::Info(buf);
     s_installedAll = true;
     return true;
+}
+
+void LogPerformance(uint64_t everyFrames)
+{
+    if (!s_perfEvery) {
+        s_perfEvery = everyFrames;
+    }
 }
 
 const uint8_t* MapGpuAddress(uint64_t gpuAddress, size_t len)

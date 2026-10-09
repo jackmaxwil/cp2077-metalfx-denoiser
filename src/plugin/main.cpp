@@ -79,6 +79,7 @@ bool Initialize()
     const char* traceEnv = std::getenv("METALFX_TRACE");
     if (denoiser || config.debug.traceMetalCompute || (traceEnv && traceEnv[0] == '1')) {
         MetalTrace::Install();
+        MetalTrace::LogPerformance(config.debug.logPerformance > 0 ? config.debug.logPerformance : 0);
     }
     if (denoiser) {
         // ModMenu calls ModMenu_Register itself if it loaded first; otherwise register here.

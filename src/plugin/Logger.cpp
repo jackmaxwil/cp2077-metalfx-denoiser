@@ -58,12 +58,14 @@ void Initialize()
         return;
     }
 
-    if (const char* filePath = std::getenv("METALFX_LOG_FILE"))
+    if (const char* filePath = std::getenv("METALFX_LOG_FILE"); filePath && filePath[0] != '\0')
     {
-        if (filePath[0] != '\0')
-        {
-            s_file.open(filePath, std::ios::out | std::ios::app);
-        }
+        s_file.open(filePath, std::ios::out | std::ios::app);
+    }
+    else
+    {
+        // The game runs with its folder as the working directory; one log per session, next to RED4ext's.
+        s_file.open("red4ext/logs/metalfxdenoiser.log", std::ios::out | std::ios::trunc);
     }
     s_initialized = true;
 }

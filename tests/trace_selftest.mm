@@ -195,6 +195,35 @@ int main()
         if (perf.find("\"gpu_ms\":{\"median\":") == std::string::npos || perf.find("\"n\":0") != std::string::npos) {
             return Fail("perf output missing or empty");
         }
+        // GPU timestamps per encoder: a profiled frame resolves its encoders' start and end samples 30 frames later.
+        {
+            std::ofstream(dir + "/req-5") << "profile selftestprof\n";
+            for (int frame = 0; frame < 80; ++frame) {
+                @autoreleasepool {
+                    id<MTLCommandBuffer> cb = [queue commandBuffer];
+                    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                    [enc setComputePipelineState:c];
+                    [enc setTexture:in atIndex:0];
+                    [enc setTexture:out atIndex:1];
+                    [enc dispatchThreadgroups:MTLSizeMake(8, 4, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                    [enc endEncoding];
+                    id<CAMetalDrawable> drawable = [layer nextDrawable];
+                    if (drawable) {
+                        [cb presentDrawable:drawable];
+                    }
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                }
+            }
+            const std::string ts = Slurp(dir + "/selftestprof.ts.json");
+            const std::string tr = Slurp(dir + "/selftestprof.trace.jsonl");
+            if (ts.find("\"samples\":[") == std::string::npos || ts.find("\"samples\":[]") != std::string::npos ||
+                ts.find("\"samples\":[null") != std::string::npos || tr.find("\"ts\":0") == std::string::npos) {
+                std::fprintf(stderr, "%s\n", ts.substr(0, 300).c_str());
+                return Fail("profile timestamps missing");
+            }
+        }
+
         // Denoise pass-through: a RELAX instance (pipelines labelled like the game's HitDistReconstruction and last
         // a-trous pass) is dropped, and its two RGBA16Float inputs are copied to its two outputs.
         {
