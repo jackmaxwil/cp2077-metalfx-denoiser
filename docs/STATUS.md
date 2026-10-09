@@ -216,12 +216,18 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   Findings kept: gViewToWorld column 2 is forward, column 1 up; the game turns the camera by 0.873 mrad per AppKit mouse
   count; it reads input on its main thread about 10 ms before its present call, so a game-thread input delay has no
   slack to remove; most input lag is after the present call (about 76 ms to the display in play).
-- HUD ghosting: the interpolator works on shown frames, which contain the HUD and its glow (the game composites the
-  UI layer plus a blurred glow pyramid onto the scene: m_hud_occupiedTiles / m_hud_emptyTiles, then
-  NoBuffers_Fullscreen to the drawable). Two fixes tried and reverted (988b7b7: take real pixels along motion paths
-  that cross the HUD, slightly better; 4fd27fa: interpolate the HUD-free scene and compose the real HUD over it, worse:
-  ghosting remained and lighting changed). Next: the game's own frame generation (Graphics > Frame Generation: FSR3,
-  the Mac build's only option besides Off), with ours off; if it works with the MetalFX denoiser, remove ours.
+- HUD ghosting: the interpolator works on shown frames, which contain the HUD and its glow. Two plugin-side fixes
+  tried and reverted (988b7b7, 4fd27fa). The game's FSR3 frame generation (the Mac build's other option) is worse.
+- Root cause of the ghost copies (2026-10-09): the game draws them on purpose. The HUD composite m_hud_occupiedTiles
+  (label 3959251910; IR from the shader cache with metal-objdump) samples the UI layer at uv and at uv +- k*d (R and B,
+  chromatic aberration) and adds blurred copies at further offsets (UI mips 1, 2, 4), all along d = the radial vector
+  from the screen centre after a barrel distortion; the whole block is gated by constant buffer float 16 (descriptor
+  6 of the first table), strengths at 108 and 112-140, distortion at 48/52. CDPR's "Remove HUD Visual Effects"
+  (Settings > Accessibility > Interface; UserSettings /accessibility/interface/PostProcessingReduction) removes "the
+  chromatic aberration effect, also known as 'ghosting', in the HUD" (cyberpunk.net update 2.1 accessibility notes);
+  "Remove HUD Lens Distortion" is LensDistortionOverride. Frame interpolation smears these soft copies further.
+- If ghosting remains with that setting on and frame generation on: Apple's intended wiring for a composited HUD
+  (WWDC25 211) is colour/prev colour = the HUD-less scene, uiTexture = the shown image, isUITextureComposited = YES.
 
 ## Input lag with frame generation (2026-10-09)
 
