@@ -17,4 +17,4 @@ cmake --build "$ROOT/build" -j8
 cmake --install "$ROOT/build" --prefix "$GAME_PATH"
 
 echo "Installed to: $GAME_PATH/red4ext/plugins/MetalFXDenoiser"
-echo "Start the game through RED4ext's launch_red4ext.sh; the plugin logs to red4ext/logs."
+echo "Start the game through RED4ext's launch_red4ext.sh; the plugin logs to red4ext/plugins/MetalFXDenoiser/metalfxdenoiser.log."

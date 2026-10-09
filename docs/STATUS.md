@@ -198,7 +198,7 @@ Path tracing with the denoiser, no frame generation, frozen spot:
 
 Player report at 3x with sharpening 0.4, texture LOD bias -0.585 and frame generation: looks great, very smooth.
 
-## Frame generation HUD (2026-10-08, unverified)
+## Frame generation HUD (2026-10-08; player-verified 2026-10-09: fixed)
 
 Player report at 2.5x: the HUD ghosts in motion. Measured with `fgeval`: in the HUD regions the interpolated frame
 scores 28.6 dB against the real in-between frame, worse than repeating the frame (32.7 dB). The game draws the HUD into
@@ -209,6 +209,21 @@ interpolating, the generated frame is copied and the HUD's pixels (layer alpha, 
 real frame (`WithHud`/`RestoreHud`; METALFX_FG_UI=0 turns it off). A compute pass on the interpolator's output itself
 lost its writes in the game (standalone it worked), hence the copy. Not yet verified: the last test run hung when the
 game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`).
+
+## Input lag with frame generation (2026-10-09)
+
+- Frame queue limiter tried and dropped. A CPU-ahead limit at the presenting commit (wait for frame N-1's GPU end;
+  optionally a just-in-time start delay) cut frame start to GPU done from 565 to 21 ms in a GPU-bound offline loop, but
+  the game already keeps one frame in flight: in game (path tracing, 2.5x, frame generation) mode 0 measured 1.0 frames
+  in flight, 68 ms frame start to GPU done, 42 ms frames; one frame queued gave 76 ms and 47 ms frames, just-in-time 75 ms
+  and 59 ms frames. Nothing to drain at the GPU queue; the code is not kept.
+- Frame generation pacing: the game's frame waited half a frame interval after the generated one, which the display
+  rounds up to whole refreshes (20.8 ms became 25 ms at 24 fps and 120 Hz). It now rounds down (16.7 ms there): just as
+  uneven the other way round, and the newest frame shows a refresh (8.3 ms) sooner. Not yet judged in play.
+- What remains: input lag follows the rendered frame time (frame generation adds about 5 ms of GPU time per frame and
+  holds the real frame about half a frame). Render scale 3x instead of 2.5x saves about 10 ms per frame.
+- Plugin log: now red4ext/plugins/MetalFXDenoiser/metalfxdenoiser.log; RED4ext's log rotation deleted it in
+  red4ext/logs (names that do not start with a plugin's name).
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 

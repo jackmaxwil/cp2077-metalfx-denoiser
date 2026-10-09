@@ -5,8 +5,8 @@
 //   into our own textures, so the next frame cannot overwrite them before the interpolation reads them.
 // - At present (Present, on the game's last command buffer): copy the presented image into our history, run
 //   MTLFXFrameInterpolator on frames N-1 and N (color: the presented images, post-processing and HUD included; depth and
-//   motion: frame N's), and show the generated frame, then frame N at least half a frame interval later
-//   (presentDrawable:afterMinimumDuration:), through an overlay layer of our own (a sublayer covering the game's layer,
+//   motion: frame N's), and show the generated frame, then frame N about half a frame interval later
+//   (presentDrawable:afterMinimumDuration:, rounded down to whole display refreshes, see Hold), through an overlay layer of our own (a sublayer covering the game's layer,
 //   with the game's pixel format and EDR settings and its own three drawables). The game's drawables are never
 //   presented and go straight back to its pool: taking extra drawables from the game's layer (three in all) starved it
 //   in fullscreen, where each nextDrawable then waited up to its one second timeout (a frame every 1-10 s).
@@ -367,6 +367,17 @@ void AfterScaler(id scaler, id commandBuffer)
 // on the main thread; the render thread only uses it once it is set.
 CAMetalLayer* g_overlay;
 bool g_overlayPending = false;
+std::atomic<double> g_refresh{1.0 / 120.0}; // the display's refresh interval (SetupOverlay)
+
+// How long frame N waits after the generated frame: half the frame interval, rounded down to whole display refreshes
+// (at least one). Drawables appear at refreshes, so asking for exactly half rounds up (20.8 ms shows after 25 ms at
+// 120 Hz); rounding down is as uneven the other way round and shows the game's frame, the newest input, a refresh
+// sooner.
+double Hold(double dt)
+{
+    const double r = g_refresh.load();
+    return std::max(1.0, std::floor(dt / 2 / r + 0.05)) * r - 0.001;
+}
 int g_slowDrawables = 0; // consecutive overlay drawable waits over 50 ms (the safety valve)
 
 void SetupOverlay(CAMetalLayer* game)
@@ -387,10 +398,18 @@ void SetupOverlay(CAMetalLayer* game)
         o.maximumDrawableCount = 3;
         o.displaySyncEnabled = YES;
         [game addSublayer:o];
+        // NSScreen through the runtime: the plugin does not link AppKit (the game does).
+        id screen = [NSClassFromString(@"NSScreen") valueForKey:@"mainScreen"];
+        const double fps = [[screen valueForKey:@"maximumFramesPerSecond"] doubleValue];
+        if (fps >= 30) {
+            g_refresh.store(1.0 / fps);
+        }
         std::lock_guard<std::mutex> lock(g_mutex);
         g_overlay = o;
         g_overlayPending = false;
-        Logger::Info("FrameGen: overlay layer ready");
+        Logger::Info("FrameGen: overlay layer ready (display refresh " +
+                     std::to_string(static_cast<int>(1.0 / g_refresh.load() + 0.5)) + " Hz" +
+                     (fps >= 30 ? ")" : ", assumed)"));
     };
     if ([NSThread isMainThread]) {
         make();
@@ -664,7 +683,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             NoteShown(generated);
             NoteShown(real);
             present(generated);         // between the previous frame and this one
-            presentAfter(real, dt / 2); // this frame half a frame interval later
+            presentAfter(real, Hold(dt)); // this frame about half a frame interval later
         } else {
             present(real);
         }

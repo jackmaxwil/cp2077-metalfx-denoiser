@@ -65,16 +65,15 @@ void Initialize()
     }
     else
     {
-        // One log per session in RED4ext's logs folder, found from this plugin's location (red4ext/plugins/<name>/):
-        // the working directory depends on how the game was started.
-        std::string path = "red4ext/logs/metalfxdenoiser.log";
+        // One log per session next to this plugin (red4ext/plugins/<name>/), like TweakXL's and ArchiveXL's: RED4ext's
+        // log rotation deletes files in red4ext/logs whose names do not start with a plugin's name.
+        std::string path = "metalfxdenoiser.log";
         Dl_info info{};
         if (dladdr(reinterpret_cast<const void*>(&Initialize), &info) && info.dli_fname) {
-            std::string dir = info.dli_fname;
-            for (int up = 0; up < 3 && dir.find('/') != std::string::npos; ++up) {
-                dir = dir.substr(0, dir.find_last_of('/')); // the dylib, its plugin folder, plugins
+            const std::string dylib = info.dli_fname;
+            if (dylib.find('/') != std::string::npos) {
+                path = dylib.substr(0, dylib.find_last_of('/')) + "/metalfxdenoiser.log";
             }
-            path = dir + "/logs/metalfxdenoiser.log";
         }
         s_file.open(path, std::ios::out | std::ios::trunc);
     }
