@@ -119,8 +119,12 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
   -0.7 ms. Settings are worth 1-2 ms, not 11.
 - Copies at 3x are mostly clears: 68 buffer fills, 472 MiB per frame, about 1.5 ms (render resolution buffers at
   4-120 bytes per pixel and a 64 MiB table). Skipping a clear is only safe if the buffer is fully rewritten first.
-- Outlook: about 24-26 ms (40 fps) rendered at 3x with the settings above looks reachable; 16.7 ms rendered does not
-  without a structural change. MetalFX frame interpolation is the remaining big lever for smoothness (not latency).
+- Native 3456x2160, frame interval (scale scenario): path tracing 49.8 ms at Performance, 27.7 ms at 3x (28.2 with
+  the denoiser); RT Psycho 38.8 / 22.4 ms; RT Ultra 41.1 / 22.9 ms. At 3x even RT Ultra is 23 ms: about 12 ms of the
+  frame is not ray tracing (raster, post-processing and the upscaler at the 7.5 MP output, clears, lights), so 16.7 ms
+  rendered at native output is out of reach on this Mac for path tracing and for RT.
+- Outlook: path tracing about 24-26 ms (40 fps) with the remaining small wins; RT about 21 ms. Feeling 60 needs a
+  lower output resolution or a lighter mode; MetalFX frame interpolation adds smoothness, not responsiveness.
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
