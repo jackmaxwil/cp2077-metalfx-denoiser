@@ -226,6 +226,11 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   (Settings > Accessibility > Interface; UserSettings /accessibility/interface/PostProcessingReduction) removes "the
   chromatic aberration effect, also known as 'ghosting', in the HUD" (cyberpunk.net update 2.1 accessibility notes);
   "Remove HUD Lens Distortion" is LensDistortionOverride. Frame interpolation smears these soft copies further.
+- Measured in play (2026-10-09) with Remove HUD Visual Effects and Remove HUD Lens Distortion on (set in
+  UserSettings.json; toggling in the menu had not been saved): the composite's distortion and aberration constants
+  are 0, ghosting without frame generation is gone. The switch at float 16 gates the whole HUD draw (zeroing it hid the
+  HUD; that toggle is reverted). Soft offset copies stay (UI mips 1, 2, 4 at offsets of up to 1.3% of the screen,
+  about 40 px): the HUD restore mask now also covers the UI layer's 16x mip widened by one texel (about +-32 px).
 - If ghosting remains with that setting on and frame generation on: Apple's intended wiring for a composited HUD
   (WWDC25 211) is colour/prev colour = the HUD-less scene, uiTexture = the shown image, isUITextureComposited = YES.
 

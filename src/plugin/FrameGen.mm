@@ -16,7 +16,8 @@
 // Camera: near plane, vertical field of view and aspect ratio from NRD's constants (Denoise::Projection; the game renders
 // reversed-Z with an infinite far plane, given here as a large finite one).
 //
-// HUD: generated frames take the HUD's pixels from the real frame (RestoreHud, the game's UI layer as mask).
+// HUD: generated frames take the HUD's pixels from the real frame (RestoreHud, the game's UI layer as mask, widened by
+// its 16x mip over the soft copies the game's HUD composite adds around the HUD).
 
 #include "FrameGen.hpp"
 #include "Denoise.hpp"
@@ -90,6 +91,16 @@ kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
         for (int x = -1; x <= 1; ++x)
             a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).a);
     a = saturate(a * 2.0);
+    // The game's HUD composite also adds soft offset copies of the HUD (up to about 40 px out, from the UI layer's
+    // mips): cover them with the layer's 16x mip (the game builds it), widened by one texel (about +-32 px).
+    if (ui.get_num_mip_levels() > 4) {
+        const int2 m = int2(ui.get_width(4), ui.get_height(4)) - 1;
+        float h = 0.0;
+        for (int y = -1; y <= 1; ++y)
+            for (int x = -1; x <= 1; ++x)
+                h = max(h, ui.read(uint2(clamp(int2(p / 16) + int2(x, y), int2(0), m)), 4).a);
+        a = max(a, saturate(h * 4.0));
+    }
     if (debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
     if (a > 0.0) gen.write(mix(gen.read(p), cur.read(p), a), p);
 }
