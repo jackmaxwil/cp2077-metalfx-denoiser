@@ -22,9 +22,6 @@ void SetWatch(bool on);
 // its MetalFX path, which the denoised scaler replaces.
 void SetSharpness(float amount);
 bool Active();
-// Zeroes the game's HUD composite effects (chromatic aberration and blurred echo copies of the HUD, barrel distortion)
-// in its constants every frame; the constants are logged either way.
-void SetHudEffectsOff(bool off);
 // The projection of the latest ray traced frame (from NRD's constants): vertical field of view in degrees, near plane,
 // aspect ratio; false before the first.
 bool Projection(float& fovY, float& nearPlane, float& aspect);

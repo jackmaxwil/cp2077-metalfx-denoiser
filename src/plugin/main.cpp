@@ -85,11 +85,6 @@ void OnFrameGenToggle(const ModMenuEntryPath*, bool on)
     FrameGen::SetEnabled(on);
 }
 
-void OnHudEffectsToggle(const ModMenuEntryPath*, bool on)
-{
-    Denoise::SetHudEffectsOff(on);
-}
-
 void OnUltraScaleChanged(const ModMenuEntryPath*, float value)
 {
     s_ultraScale.store(value);
@@ -134,7 +129,6 @@ bool Initialize()
     MetalTrace::SetSamplerLodBias(lodEnv && *lodEnv ? std::strtof(lodEnv, nullptr) : config.textureLodBias);
     const char* sharpEnv = std::getenv("METALFX_SHARPNESS");
     Denoise::SetSharpness(sharpEnv && *sharpEnv ? std::strtof(sharpEnv, nullptr) : config.sharpness);
-    Denoise::SetHudEffectsOff(config.removeHudEffects);
     const bool denoiser = Denoise::Supported();
     if (denoiser) {
         ApplyMode();
@@ -216,10 +210,6 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                          .step = 0.05f,
                                          .defaultValue = Config::Get().sharpness,
                                          .onChanged = &MetalFXDenoiser::OnSharpnessChanged};
-    const ModMenuToggleInfo hudFx = {.entryId = {"remove_hud_effects"},
-                                     .title = {"Remove the HUD's echo copies and distortion (game HUD composite)"},
-                                     .defaultValue = Config::Get().removeHudEffects,
-                                     .onChanged = &MetalFXDenoiser::OnHudEffectsToggle};
     const ModMenuToggleInfo noisy = {.entryId = {"noisy_lighting"},
                                      .title = {"Debug: noisy lighting (no denoiser)"},
                                      .defaultValue = MetalFXDenoiser::s_noisy.load(),
@@ -230,7 +220,6 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                     api->RegisterSlider("MetalFXDenoiser", "main", &ultraScale) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
                     api->RegisterSlider("MetalFXDenoiser", "main", &sharpness) &&
-                    api->RegisterToggle("MetalFXDenoiser", "main", &hudFx) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");
     return ok;
