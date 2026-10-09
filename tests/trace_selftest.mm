@@ -41,9 +41,14 @@ static int Fail(const char* what)
     return 1;
 }
 
-int main()
+int main(int, char** argv)
 {
     @autoreleasepool {
+        // The tracer's request folder is trace/ next to the binary; the paths below are relative to it.
+        const std::string self = argv[0];
+        if (self.find('/') != std::string::npos && chdir(self.substr(0, self.rfind('/')).c_str()) != 0) {
+            return Fail("chdir to the binary's folder");
+        }
         if (!MetalTrace::Install()) {
             return Fail("install");
         }
