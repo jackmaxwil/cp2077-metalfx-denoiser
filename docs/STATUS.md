@@ -216,10 +216,16 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   Findings kept: gViewToWorld column 2 is forward, column 1 up; the game turns the camera by 0.873 mrad per AppKit mouse
   count; it reads input on its main thread about 10 ms before its present call, so a game-thread input delay has no
   slack to remove; most input lag is after the present call (about 76 ms to the display in play).
-- HUD ghosts beside HUD elements in generated frames during fast turns (the interpolator drags HUD pixels along the
-  scene's motion, outside the UI layer's mask): fg_hud now also takes the real frame's pixel wherever a pixel's motion
-  path (this frame's motion vectors, game scale 1382x864 render pixels, times 2.5 to output; both directions, up to a
-  whole frame's motion) crosses the HUD. METALFX_FG_HUDDEBUG=1 paints those pixels cyan. Not yet judged in play.
+- HUD ghosting, root cause: frame generation interpolated the shown frames, which already contain the HUD and its glow
+  (the game composites the UI layer plus a blurred glow pyramid, 1728x1080 down to 216x135, onto the scene in one
+  compute encoder: m_hud_occupiedTiles, label 3959251910, for 16 px tiles with HUD; m_hud_emptyTiles, 3985020153, copies
+  the scene elsewhere; then NoBuffers_Fullscreen copies the result to the drawable). Masks over the UI layer cannot
+  cover the glow. Fix: Denoise.mm picks the scene both kernels read (the only RGBA16Float texture they only read,
+  output size, 2D array) at their dispatch (the encoder's resource list is cleared after each dispatch, so not at the
+  encoder's end); FrameGen copies it, interpolates scenes N-1 and N, and shows the real frame plus the interpolated
+  scene's change outside the HUD: cur + (f(gen) - f(scene)) * (1 - UI alpha), with the last pass f measured live as
+  shown = k * scene^g on HUD-free pixels (logged). Falls back to the old path (HUD restore) without a scene. Self-test:
+  a pass labelled like the composite reading a 2D array scene; 10 of 11 frames from scenes. Not yet judged in play.
 
 ## Input lag with frame generation (2026-10-09)
 
