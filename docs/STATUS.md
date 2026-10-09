@@ -231,6 +231,13 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   are 0, ghosting without frame generation is gone. The switch at float 16 gates the whole HUD draw (zeroing it hid the
   HUD; that toggle is reverted). Soft offset copies stay (UI mips 1, 2, 4 at offsets of up to 1.3% of the screen,
   about 40 px): the HUD restore mask now also covers the UI layer's 16x mip widened by one texel (about +-32 px).
+- Why the HUD restore never worked in play (found 2026-10-09 in saved frames): a run with the debug paint showed the
+  restore saw no HUD at all (every generated pixel green), and a normal run restored only 62-70% of fully opaque HUD
+  pixels, while a copy of the same UI layer in the same command buffer showed the whole HUD. At present time the
+  game's UI layer is already being cleared and redrawn for the next frame (its resources are not hazard tracked). Fix:
+  FrameGen::HudComposite snapshots the UI layer's alpha (level 0 and the 16x mip) inside the game's HUD composite
+  encoder (m_hud_occupiedTiles, via Denoise's encoder hooks), and the restore reads the snapshot. Self-test: a
+  composite stand-in with a 2D array, mipmapped UI layer; the debug paint covers 2048 of 2048 pixels.
 - If ghosting remains with that setting on and frame generation on: Apple's intended wiring for a composited HUD
   (WWDC25 211) is colour/prev colour = the HUD-less scene, uiTexture = the shown image, isUITextureComposited = YES.
 

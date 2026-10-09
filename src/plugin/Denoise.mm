@@ -30,6 +30,7 @@
 // The buffers are read through MetalTrace's registry of the game's large shared heap buffers.
 
 #include "Denoise.hpp"
+#include "FrameGen.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
 
@@ -104,6 +105,7 @@ struct Enc {
     bool open = false;
     int atrous = 0;
     bool kept = false; // the chain's keep pass has run
+    bool hudComposite = false; // the game's HUD composite ran in this encoder (FrameGen::HudComposite)
     std::vector<id<MTLTexture>> in, out;
     std::vector<Job> jobs;
 };
@@ -485,6 +487,9 @@ bool Dispatch(id encoder)
     }
     Enc& e = it->second;
     bool drop = false;
+    if (e.label == "3959251910") { // m_hud_occupiedTiles: the game composites the UI layer onto the frame
+        e.hudComposite = true;
+    }
     const Chain* c = StartOf(e.label);
     if (c && (!e.open || e.atrous > 0 || e.chain != c)) {
         if (e.open) {
@@ -524,6 +529,7 @@ bool Dispatch(id encoder)
 void EndEncoding(id encoder)
 {
     std::vector<Job> jobs;
+    bool hudComposite = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_enc.find((__bridge const void*)encoder);
@@ -534,7 +540,11 @@ void EndEncoding(id encoder)
             Close(it->second);
         }
         jobs = std::move(it->second.jobs);
+        hudComposite = it->second.hudComposite;
         g_enc.erase(it);
+    }
+    if (hudComposite) {
+        FrameGen::HudComposite(encoder);
     }
     if (jobs.empty()) {
         return;

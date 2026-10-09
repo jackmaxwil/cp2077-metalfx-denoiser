@@ -264,10 +264,42 @@ int main(int, char** argv)
             fl.device = dev;
             fl.pixelFormat = MTLPixelFormatRGBA16Float;
             fl.drawableSize = CGSizeMake(64, 32);
-            // A HUD layer like the game's (output size, RGBA8 sRGB, drawn every frame): exercises the HUD restore.
+            // A HUD layer like the game's: output size, RGBA8 sRGB, a 2D array of one slice with mips, drawn every
+            // frame (fully covered here). The HUD restore must cover the whole generated frame (debug paint: magenta).
             fd.pixelFormat = MTLPixelFormatRGBA8Unorm_sRGB;
             fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            fd.textureType = MTLTextureType2DArray;
+            fd.arrayLength = 1;
+            fd.mipmapLevelCount = 5;
             id<MTLTexture> fui = [dev newTextureWithDescriptor:fd];
+            fd.textureType = MTLTextureType2D;
+            fd.mipmapLevelCount = 1;
+            // A stand-in for the game's HUD composite (m_hud_occupiedTiles, found by its label through Denoise's
+            // encoder hooks), where FrameGen snapshots the UI layer for the restore.
+            static const char* compSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x < out.get_width() && p.y < out.get_height()) out.write(float4(0.0), p);
+}
+)";
+            NSError* compErr = nil;
+            id<MTLLibrary> compLib = [dev newLibraryWithSource:@(compSource) options:nil error:&compErr];
+            MTLComputePipelineDescriptor* cpd = [[MTLComputePipelineDescriptor new] autorelease];
+            cpd.computeFunction = [compLib newFunctionWithName:@"hud_comp"];
+            cpd.label = @"3959251910";
+            id<MTLComputePipelineState> comp = [dev newComputePipelineStateWithDescriptor:cpd
+                                                                                  options:MTLPipelineOptionNone
+                                                                               reflection:nil
+                                                                                    error:&compErr];
+            fd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> composited = [dev newTextureWithDescriptor:fd];
+            if (!comp || !composited) {
+                return Fail("HUD composite stand-in");
+            }
+            Denoise::SetMode("pass"); // the encoder hooks feed Denoise, which finds the composite
+            FrameGen::SetHudDebug(true);
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
             for (int frame = 0; frame < 12; ++frame) {
@@ -279,6 +311,11 @@ int main(int, char** argv)
                     uiPass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1);
                     uiPass.colorAttachments[0].storeAction = MTLStoreActionStore;
                     [[cb renderCommandEncoderWithDescriptor:uiPass] endEncoding];
+                    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+                    [ce setComputePipelineState:comp];
+                    [ce setTexture:composited atIndex:0];
+                    [ce dispatchThreads:MTLSizeMake(64, 32, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                    [ce endEncoding];
                     ts.colorTexture = fc;
                     ts.depthTexture = fz;
                     ts.motionTexture = fm;
@@ -293,9 +330,33 @@ int main(int, char** argv)
                 }
             }
             FrameGen::SetEnabled(false);
+            FrameGen::SetHudDebug(false);
+            Denoise::SetMode("off");
             if (FrameGen::Generated() - before < 8) {
                 std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
                 return Fail("frame generation produced no frames");
+            }
+            id<MTLTexture> gen = FrameGen::LastGenerated();
+            if (!gen) {
+                return Fail("HUD restore produced no frame");
+            }
+            id<MTLBuffer> px = [dev newBufferWithLength:64 * 32 * 8 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> rcb = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> rb = [rcb blitCommandEncoder];
+            [rb copyFromTexture:gen sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(64, 32, 1) toBuffer:px destinationOffset:0 destinationBytesPerRow:64 * 8
+                destinationBytesPerImage:64 * 32 * 8];
+            [rb endEncoding];
+            [rcb commit];
+            [rcb waitUntilCompleted];
+            const __fp16* h = static_cast<const __fp16*>(px.contents);
+            int magenta = 0;
+            for (int i = 0; i < 64 * 32; ++i) {
+                magenta += h[i * 4] > 0.5f && h[i * 4 + 1] < 0.3f && h[i * 4 + 2] > 0.5f;
+            }
+            std::fprintf(stderr, "HUD restore: %d of %d pixels restored (HUD layer covers all)\n", magenta, 64 * 32);
+            if (magenta < 64 * 32 * 9 / 10) {
+                return Fail("HUD restore does not see the HUD layer");
             }
         }
 

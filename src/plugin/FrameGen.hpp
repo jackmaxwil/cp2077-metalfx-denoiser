@@ -20,6 +20,15 @@ void Evaluate(int samples);
 #include <objc/objc.h>
 namespace FrameGen {
 
+// Tests: paint the HUD restore's area (magenta) and the rest (green) on generated frames; the last generated frame
+// with the HUD restored.
+void SetHudDebug(bool on);
+id LastGenerated();
+
+// The game's HUD composite (Denoise.mm finds it: compute pipeline 3959251910, m_hud_occupiedTiles) ends in encoder,
+// still open: snapshots the UI layer's alpha there for the HUD restore.
+void HudComposite(id encoder);
+
 // After the game's MetalFX temporal scaler encode (either scaler): copies this frame's depth and motion.
 void AfterScaler(id scaler, id commandBuffer);
 

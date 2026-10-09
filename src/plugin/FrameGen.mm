@@ -78,10 +78,24 @@ const bool g_useUi = [] {
 NSString* const kHudSource = @R"(
 #include <metal_stdlib>
 using namespace metal;
+// Snapshots of the UI layer's alpha (level 0, and its 16x mip when it has one), taken in the game's HUD composite.
+kernel void fg_ui_copy_array(texture2d_array<float, access::read> src [[texture(0)]],
+                             texture2d<float, access::write> dst [[texture(1)]],
+                             constant uint& lod [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(float4(src.read(p, 0, lod).a), p);
+}
+kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
+                       constant uint& lod [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(float4(src.read(p, lod).a), p);
+}
+struct HudParams { uint debug; uint hasLow; };
 kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
                    texture2d<float, access::read> cur [[texture(1)]],
                    texture2d<float, access::read> ui [[texture(2)]],
-                   constant uint& debug [[buffer(0)]],
+                   texture2d<float, access::read> low [[texture(3)]],
+                   constant HudParams& h [[buffer(0)]],
                    uint2 p [[thread_position_in_grid]])
 {
     if (p.x >= gen.get_width() || p.y >= gen.get_height()) return;
@@ -89,39 +103,61 @@ kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
     float a = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x)
-            a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).a);
+            a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).r);
     a = saturate(a * 2.0);
     // The game's HUD composite also adds soft offset copies of the HUD (up to about 40 px out, from the UI layer's
-    // mips): cover them with the layer's 16x mip (the game builds it), widened by one texel (about +-32 px).
-    if (ui.get_num_mip_levels() > 4) {
-        const int2 m = int2(ui.get_width(4), ui.get_height(4)) - 1;
-        float h = 0.0;
+    // mips): cover them with the layer's 16x mip, widened by one texel (about +-32 px).
+    if (h.hasLow != 0u) {
+        const int2 m = int2(low.get_width(), low.get_height()) - 1;
+        float b = 0.0;
         for (int y = -1; y <= 1; ++y)
             for (int x = -1; x <= 1; ++x)
-                h = max(h, ui.read(uint2(clamp(int2(p / 16) + int2(x, y), int2(0), m)), 4).a);
-        a = max(a, saturate(h * 4.0));
+                b = max(b, low.read(uint2(clamp(int2(p / 16) + int2(x, y), int2(0), m))).r);
+        a = max(a, saturate(b * 4.0));
     }
-    if (debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
+    if (h.debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
     if (a > 0.0) gen.write(mix(gen.read(p), cur.read(p), a), p);
 }
 )";
-id<MTLComputePipelineState> g_hud;
+id<MTLComputePipelineState> g_hud, g_uiCopy, g_uiCopyArray;
+// The UI layer's alpha as the game's HUD composite read it (HudComposite), for the frame g_uiSnapFrame: reading the
+// game's UI layer itself at present time saw it cleared or half redrawn for the next frame (debug paint all green,
+// 62-70% of opaque HUD pixels restored), as the game's resources are not hazard tracked.
+id<MTLTexture> g_uiSnap, g_uiSnapLow;
+uint64_t g_uiSnapFrame = 0;
 id<MTLTexture> g_hudOut; // the generated frame with the HUD restored
+// METALFX_FG_HUDDEBUG=1 (or SetHudDebug): paint the restored area magenta, the rest green, on generated frames.
+std::atomic<bool> g_hudDebug{[] {
+    const char* env = std::getenv("METALFX_FG_HUDDEBUG");
+    return env && *env == '1';
+}()};
 id<MTLTexture> Make(id<MTLDevice> d, MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage usage);
 bool Fits(id<MTLTexture> t, id<MTLTexture> like);
 
-// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer has coverage.
+bool HudPipelines(id<MTLDevice> dev)
+{
+    if (g_hud && g_uiCopy && g_uiCopyArray) {
+        return true;
+    }
+    NSError* error = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:kHudSource options:nil error:&error];
+    g_hud = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_hud"] error:&error];
+    g_uiCopy = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_ui_copy"] error:&error];
+    g_uiCopyArray = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_ui_copy_array"] error:&error];
+    if (!g_hud || !g_uiCopy || !g_uiCopyArray) {
+        Logger::Error(std::string("FrameGen: HUD kernels failed: ") +
+                      (error ? error.localizedDescription.UTF8String : "no library"));
+        g_hud = nil;
+        return false;
+    }
+    return true;
+}
+
+// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer snapshot has coverage.
 void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui)
 {
-    if (!g_hud) {
-        NSError* error = nil;
-        id<MTLLibrary> lib = [cb.device newLibraryWithSource:kHudSource options:nil error:&error];
-        g_hud = [cb.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_hud"] error:&error];
-        if (!g_hud) {
-            Logger::Error(std::string("FrameGen: HUD kernel failed: ") +
-                          (error ? error.localizedDescription.UTF8String : "no library"));
-            return;
-        }
+    if (!HudPipelines(cb.device)) {
+        return;
     }
     MetalTrace::Internal internal;
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
@@ -129,11 +165,9 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setTexture:gen atIndex:0];
     [ce setTexture:cur atIndex:1];
     [ce setTexture:ui atIndex:2];
-    static const uint32_t debug = [] {
-        const char* env = std::getenv("METALFX_FG_HUDDEBUG");
-        return env && *env == '1' ? 1u : 0u;
-    }();
-    [ce setBytes:&debug length:sizeof(debug) atIndex:0];
+    [ce setTexture:g_uiSnapLow ? g_uiSnapLow : ui atIndex:3];
+    const uint32_t params[2] = {g_hudDebug.load() ? 1u : 0u, g_uiSnapLow ? 1u : 0u};
+    [ce setBytes:params length:sizeof(params) atIndex:0];
     [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
     static std::atomic<int> logged{0};
@@ -311,6 +345,59 @@ void Evaluate(int samples)
     g_evalWarm = 0;
     g_evalInterp = nil;
     Logger::Info("FrameGen: evaluating " + std::to_string(samples) + " samples");
+}
+
+void HudComposite(id encoder)
+{
+    if (!Enabled()) {
+        return;
+    }
+    uint64_t frame;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        frame = g_frame;
+    }
+    id<MTLTexture> ui = CurrentUi(frame);
+    if (!ui) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!HudPipelines(ui.device)) {
+        return;
+    }
+    if (!g_uiSnap || g_uiSnap.width != ui.width || g_uiSnap.height != ui.height) {
+        g_uiSnap = Make(ui.device, MTLPixelFormatR8Unorm, ui.width, ui.height,
+                        MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+        g_uiSnapLow = ui.mipmapLevelCount > 4 ? Make(ui.device, MTLPixelFormatR8Unorm, std::max<NSUInteger>(1, ui.width >> 4),
+                                                     std::max<NSUInteger>(1, ui.height >> 4),
+                                                     MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite)
+                                              : nil;
+    }
+    MetalTrace::Internal internal;
+    id<MTLComputeCommandEncoder> ce = encoder; // the game's, still open: the copies run last in it
+    [ce setComputePipelineState:ui.textureType == MTLTextureType2DArray ? g_uiCopyArray : g_uiCopy];
+    [ce setTexture:ui atIndex:0];
+    for (uint32_t lod : {0u, 4u}) {
+        id<MTLTexture> dst = lod ? g_uiSnapLow : g_uiSnap;
+        if (!dst) {
+            continue;
+        }
+        [ce setTexture:dst atIndex:1];
+        [ce setBytes:&lod length:sizeof(lod) atIndex:0];
+        [ce dispatchThreads:MTLSizeMake(dst.width, dst.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    }
+    g_uiSnapFrame = frame + 1; // for the frame being presented next
+}
+
+void SetHudDebug(bool on)
+{
+    g_hudDebug.store(on);
+}
+
+id LastGenerated()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_hudOut;
 }
 
 void SetEnabled(bool on)
@@ -552,7 +639,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             }
             id<MTLFXFrameInterpolator> fi = g_evalInterp;
             const bool jitter = g_passJitter, useUi = g_useUi && g_evalIndex % 2 == 1;
-            id<MTLTexture> ui = useUi ? CurrentUi(g_frame) : nil;
+            id<MTLTexture> ui = useUi && g_uiSnapFrame == g_frame ? g_uiSnap : nil;
             fi.colorTexture = g_cur;
             fi.prevColorTexture = g_prev2;
             fi.depthTexture = g_depth;
@@ -639,7 +726,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
-                genTex = WithHud(cb, g_out, g_cur, g_useUi ? CurrentUi(g_frame) : nil);
+                genTex = WithHud(cb, g_out, g_cur, g_useUi && g_uiSnapFrame == g_frame ? g_uiSnap : nil);
                 if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
                     const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
                     MetalTrace::SaveTexture(cb, genTex, base + "-gen");
