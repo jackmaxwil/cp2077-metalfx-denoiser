@@ -26,12 +26,6 @@ sharpness = 0.0
 # 3456x2160: about 28 ms at 3.0, 32 ms at 2.75, 38 ms at 2.5). Also in ModMenu.
 ultra_scale = 3.0
 
-# Frame warp (with frame generation): re-aims each shown frame to the newest mouse input just before it is shown, so
-# turning shows up without waiting for the game to render it. Rotation only; the edges a turn reveals repeat the frame's
-# border pixels. Uses the game's own mouse input and calibrates itself while you turn (the log's "Input lag" line).
-# Also in ModMenu.
-frame_warp = false
-
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false

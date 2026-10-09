@@ -58,13 +58,11 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/MetalTrace.mm
     src/plugin/Denoise.mm
     src/plugin/FrameGen.mm
-    src/plugin/Input.mm
-    src/plugin/Warp.mm
 )
 
 # MetalTrace.mm is built without ARC: its hooks take their arguments unretained, like the methods they replace.
 # Denoise.mm (the prototype the hooks call) is built with ARC.
-set_source_files_properties(src/plugin/Denoise.mm src/plugin/FrameGen.mm src/plugin/Input.mm src/plugin/Warp.mm PROPERTIES COMPILE_OPTIONS
+set_source_files_properties(src/plugin/Denoise.mm src/plugin/FrameGen.mm PROPERTIES COMPILE_OPTIONS
     "-fobjc-arc;-Wno-unguarded-availability-new")
 
 target_include_directories(MetalFXDenoiser PRIVATE
@@ -85,7 +83,6 @@ target_link_libraries(MetalFXDenoiser PRIVATE
     "-framework ImageIO"
     "-framework CoreGraphics"
     "-framework Foundation"
-    "-framework AppKit"
 )
 
 set_target_properties(MetalFXDenoiser PROPERTIES
@@ -116,7 +113,7 @@ install(FILES ${CMAKE_SOURCE_DIR}/config/config.toml.template
 # Tracer self-test (not installed): ./build/trace_selftest
 # (trace_selftest links the same frameworks as the plugin)
 add_executable(trace_selftest tests/trace_selftest.mm tests/configvars_stub.cpp src/plugin/MetalTrace.mm
-    src/plugin/Denoise.mm src/plugin/FrameGen.mm src/plugin/Input.mm src/plugin/Warp.mm src/plugin/Logger.cpp)
+    src/plugin/Denoise.mm src/plugin/FrameGen.mm src/plugin/Logger.cpp)
 target_include_directories(trace_selftest PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
 target_link_libraries(trace_selftest PRIVATE
     "-framework ImageIO"
@@ -125,7 +122,6 @@ target_link_libraries(trace_selftest PRIVATE
     "-framework MetalFX"
     "-framework QuartzCore"
     "-framework Foundation"
-    "-framework AppKit"
 )
 
 # Denoised scaler cost at the game's sizes (not installed): ./build/denoiser_bench [frames]

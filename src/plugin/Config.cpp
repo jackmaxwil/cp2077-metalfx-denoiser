@@ -123,8 +123,6 @@ bool Load(const std::string& path) {
                 s_settings.textureLodBias = ParseFloat(value);
             } else if (key == "sharpness") {
                 s_settings.sharpness = ParseFloat(value);
-            } else if (key == "frame_warp") {
-                s_settings.frameWarp = ParseBool(value);
             }
         } else if (currentSection == "features") {
             if (key == "shadows") {

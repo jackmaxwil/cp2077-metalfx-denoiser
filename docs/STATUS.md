@@ -210,21 +210,15 @@ real frame (`WithHud`/`RestoreHud`; METALFX_FG_UI=0 turns it off). A compute pas
 lost its writes in the game (standalone it worked), hence the copy. Not yet verified: the last test run hung when the
 game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`).
 
-## Frame warp (2026-10-09)
+## Frame warp (2026-10-09, removed)
 
-- First version (raw mouse from GCMouse, game-thread input delay) was broken in play: GCMouse counts did not match the
-  game's camera (fit R2 0.08), so frames were re-aimed by wrong amounts; the HUD also ghosted (input delay 10 ms on).
-- Measured with synthetic mouse turns sent to the game (cp-run MOUSE event, tools/mousemove.swift; recorder
-  METALFX_WARP_RECORD): gViewToWorld column 2 is forward, column 1 up; the game turns the camera by exactly 0.873 mrad
-  per AppKit mouse count on both axes (fit R2 1.000 yaw, 0.999 pitch); the game reads input on its main thread about
-  10 ms before its present call. So there is no game-thread slack to remove (input delay dropped), and the lag is after
-  the present call: about 76 ms to the display in play (GPU a frame behind, hold, refresh).
-- Frame warp now uses the game's own mouse events (taken at the main thread's event pump, which keeps running while the
-  GPU works on earlier frames). Check run (hudcheck): calibration R2 1.00 at 10 ms; re-aimed frames turn the right way,
-  52-58 px during a slow turn where the next frame moves 24-30 px (the input of about 77 ms between the game's read and
-  the late present). HUD restored on 240 of 240 generated frames with either hold.
-- Rotation only (yaw about world z, pitch about the camera's right axis); HUD pixels stay put; revealed edges repeat
-  border pixels; at most 4 degrees.
+- Tried and removed (commits 1ef7bae, 8612718, reverted): re-aiming frames to the newest mouse input before display.
+  Findings kept: gViewToWorld column 2 is forward, column 1 up; the game turns the camera by 0.873 mrad per AppKit mouse
+  count; it reads input on its main thread about 10 ms before its present call, so a game-thread input delay has no
+  slack to remove; most input lag is after the present call (about 76 ms to the display in play).
+- Open: HUD ghosts beside HUD elements in generated frames during fast turns (the interpolator drags HUD pixels along the
+  scene's motion, outside the UI layer's mask). Idea not built: where a pixel's motion path crosses the HUD mask, take
+  it from the real frame.
 
 ## Input lag with frame generation (2026-10-09)
 
@@ -233,9 +227,8 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   the game already keeps one frame in flight: in game (path tracing, 2.5x, frame generation) mode 0 measured 1.0 frames
   in flight, 68 ms frame start to GPU done, 42 ms frames; one frame queued gave 76 ms and 47 ms frames, just-in-time 75 ms
   and 59 ms frames. Nothing to drain at the GPU queue; the code is not kept.
-- Frame generation pacing: the game's frame waited half a frame interval after the generated one, which the display
-  rounds up to whole refreshes (20.8 ms became 25 ms at 24 fps and 120 Hz). It now rounds down (16.7 ms there): just as
-  uneven the other way round, and the newest frame shows a refresh (8.3 ms) sooner. Not yet judged in play.
+- Frame generation pacing rounded down to whole refreshes (ed1f2f4): reverted with frame warp; the hold is half a
+  frame interval again.
 - What remains: input lag follows the rendered frame time (frame generation adds about 5 ms of GPU time per frame and
   holds the real frame about half a frame). Render scale 3x instead of 2.5x saves about 10 ms per frame.
 - Plugin log: now red4ext/plugins/MetalFXDenoiser/metalfxdenoiser.log; RED4ext's log rotation deleted it in

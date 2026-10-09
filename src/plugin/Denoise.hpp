@@ -27,8 +27,6 @@ bool Active();
 bool Projection(float& fovY, float& nearPlane, float& aspect);
 // The camera of the latest ray traced frame (NRD's gCameraDelta and gViewToWorld); false before the first.
 bool Camera(float delta[4], float viewToWorld[16], uint64_t& serial);
-// The latest ray traced frame's view to clip matrix (column-major, NRD's gWorldToClip times gViewToWorld).
-bool ViewToClip(float m[16]);
 
 #ifdef __OBJC__ // the hooks (MetalTrace.mm); plain C++ (main.cpp, with RED4ext's Windows BOOL) sees only the above
 } // namespace Denoise
