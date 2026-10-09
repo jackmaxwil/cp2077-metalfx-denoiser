@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 // In-process tracing of Metal compute encoding via Objective-C method swizzling.
 // Logs each distinct compute pipeline state the game binds, the first step toward
@@ -13,6 +14,9 @@ bool Install();
 
 // Restores the original implementation.
 void Uninstall();
+
+// Runs fn at the first presented frame (before the cvar-startup.txt settings), on the presenting thread.
+void OnFirstFrame(std::function<void()> fn);
 
 // A 120-frame timing window every everyFrames frames, logged as one "Perf play-<frame>" line (0: off; the
 // METALFX_PERF_EVERY environment variable wins).

@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <functional>
 #include <mach/mach_time.h>
 #include <type_traits>
 #include <map>
@@ -482,6 +483,7 @@ struct Perf {
     std::vector<std::vector<std::pair<double, double>>> gpu; // per frame: command buffer GPU intervals
 };
 std::atomic<bool> s_perfActive{false};
+std::function<void()> s_firstFrame; // OnFirstFrame
 uint64_t s_perfEvery = 0; // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
 // The window being recorded. Each window has its own buffer: command buffers of its last frames complete after the
 // window ends, while the next window may already be recording.
@@ -1092,6 +1094,9 @@ void OnPresent(bool fromCommandBuffer)
     }
     StepBatch(frame);
     if (frame == 1) {
+        if (s_firstFrame) {
+            s_firstFrame();
+        }
         std::ifstream startup(s_dir.substr(0, s_dir.find_last_of('/')) + "/cvar-startup.txt");
         for (std::string line; std::getline(startup, line);) {
             if (!line.empty() && line[0] != '#') {
@@ -2426,6 +2431,95 @@ void H_asCompact(id self, SEL sel, id src, id dst)
     ORIG(o_asCompact, void (*)(id, SEL, id, id), self)(self, sel, src, dst);
 }
 
+// Blit operations in traced frames: what a frame's copies move ({"e":"blit","op":...,"src":...,"dst":...,"bytes":N}).
+Orig o_bTT, o_bTTRegion, o_bBB, o_bBT, o_bTB, o_bFill, o_bMips;
+
+void NoteBlit(id self, const char* op, id src, id dst, uint64_t bytes)
+{
+    std::lock_guard<std::mutex> lock(s_capMutex);
+    std::string line = "{\"e\":\"blit\"," + SeqField() + ",\"enc\":" + P((__bridge const void*)self) + ",\"op\":\"" +
+                       op + "\"";
+    for (auto [key, r] : {std::pair{"src", src}, std::pair{"dst", dst}}) {
+        if (!r) {
+            continue;
+        }
+        if ([r respondsToSelector:@selector(pixelFormat)]) {
+            NoteTexture(r);
+        }
+        line += std::string(",\"") + key + "\":" + P((__bridge const void*)r);
+    }
+    Emit(line + ",\"bytes\":" + std::to_string(bytes) + "}");
+}
+
+uint64_t TexBytes(id<MTLTexture> t, MTLSize size)
+{
+    return t ? static_cast<uint64_t>(size.width) * size.height * size.depth * std::max<size_t>(1, BytesPerPixel(t.pixelFormat)) : 0;
+}
+
+void H_bTT(id self, SEL sel, id src, id dst)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        id<MTLTexture> t = src;
+        NoteBlit(self, "tex>tex", src, dst, TexBytes(t, MTLSizeMake(t.width, t.height, t.depth)) * t.arrayLength);
+    }
+    ORIG(o_bTT, void (*)(id, SEL, id, id), self)(self, sel, src, dst);
+}
+
+void H_bTTRegion(id self, SEL sel, id src, NSUInteger ss, NSUInteger sl, MTLOrigin so, MTLSize size, id dst,
+                 NSUInteger ds, NSUInteger dl, MTLOrigin dor)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        NoteBlit(self, "tex>tex region", src, dst, TexBytes(src, size));
+    }
+    ORIG(o_bTTRegion, void (*)(id, SEL, id, NSUInteger, NSUInteger, MTLOrigin, MTLSize, id, NSUInteger, NSUInteger,
+                               MTLOrigin), self)(self, sel, src, ss, sl, so, size, dst, ds, dl, dor);
+}
+
+void H_bBB(id self, SEL sel, id src, NSUInteger so, id dst, NSUInteger dof, NSUInteger size)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        NoteBlit(self, "buf>buf", src, dst, size);
+    }
+    ORIG(o_bBB, void (*)(id, SEL, id, NSUInteger, id, NSUInteger, NSUInteger), self)(self, sel, src, so, dst, dof, size);
+}
+
+void H_bBT(id self, SEL sel, id src, NSUInteger so, NSUInteger bpr, NSUInteger bpi, MTLSize size, id dst, NSUInteger ds,
+           NSUInteger dl, MTLOrigin dor)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        NoteBlit(self, "buf>tex", src, dst, TexBytes(dst, size));
+    }
+    ORIG(o_bBT, void (*)(id, SEL, id, NSUInteger, NSUInteger, NSUInteger, MTLSize, id, NSUInteger, NSUInteger, MTLOrigin),
+         self)(self, sel, src, so, bpr, bpi, size, dst, ds, dl, dor);
+}
+
+void H_bTB(id self, SEL sel, id src, NSUInteger ss, NSUInteger sl, MTLOrigin so, MTLSize size, id dst, NSUInteger dof,
+           NSUInteger bpr, NSUInteger bpi)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        NoteBlit(self, "tex>buf", src, dst, TexBytes(src, size));
+    }
+    ORIG(o_bTB, void (*)(id, SEL, id, NSUInteger, NSUInteger, MTLOrigin, MTLSize, id, NSUInteger, NSUInteger, NSUInteger),
+         self)(self, sel, src, ss, sl, so, size, dst, dof, bpr, bpi);
+}
+
+void H_bFill(id self, SEL sel, id buf, NSRange range, uint8_t value)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        NoteBlit(self, "fill", nil, buf, range.length);
+    }
+    ORIG(o_bFill, void (*)(id, SEL, id, NSRange, uint8_t), self)(self, sel, buf, range, value);
+}
+
+void H_bMips(id self, SEL sel, id tex)
+{
+    if (s_capture.load(std::memory_order_relaxed)) {
+        id<MTLTexture> t = tex;
+        NoteBlit(self, "mips", nil, tex, TexBytes(t, MTLSizeMake(t.width, t.height, t.depth)) / 3);
+    }
+    ORIG(o_bMips, void (*)(id, SEL, id), self)(self, sel, tex);
+}
+
 // --- MetalFX -----------------------------------------------------------------------------------------------------
 Orig o_fxTemporalNew, o_fxSpatialNew, o_fxTemporalEncode, o_fxSpatialEncode;
 std::atomic<int> s_fxLogged{0};
@@ -2810,6 +2904,18 @@ bool Install()
             H(cls, @selector(endEncoding), (IMP)H_endEnc, o_endEnc);
         }
     }
+    if (blit) {
+        H(blit, @selector(copyFromTexture:toTexture:), (IMP)H_bTT, o_bTT);
+        H(blit, @selector(copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:
+                          destinationLevel:destinationOrigin:), (IMP)H_bTTRegion, o_bTTRegion);
+        H(blit, @selector(copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:), (IMP)H_bBB, o_bBB);
+        H(blit, @selector(copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:
+                          destinationSlice:destinationLevel:destinationOrigin:), (IMP)H_bBT, o_bBT);
+        H(blit, @selector(copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:
+                          destinationBytesPerRow:destinationBytesPerImage:), (IMP)H_bTB, o_bTB);
+        H(blit, @selector(fillBuffer:range:value:), (IMP)H_bFill, o_bFill);
+        H(blit, @selector(generateMipmapsForTexture:), (IMP)H_bMips, o_bMips);
+    }
     for (Class cls : {queueCb, compute, computeConc, render, blit, accel}) {
         if (cls) {
             H(cls, @selector(pushDebugGroup:), (IMP)H_push, o_push);
@@ -2831,6 +2937,11 @@ bool Install()
     Logger::Info(buf);
     s_installedAll = true;
     return true;
+}
+
+void OnFirstFrame(std::function<void()> fn)
+{
+    s_firstFrame = std::move(fn);
 }
 
 void LogPerformance(uint64_t everyFrames)

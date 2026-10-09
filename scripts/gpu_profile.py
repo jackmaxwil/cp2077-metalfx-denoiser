@@ -51,6 +51,7 @@ def main(path, top=30):
     except OSError:
         pass
     pipes = {e["id"]: e for e in events if e["e"] == "pipe"}
+    tex = {e["id"]: e for e in events if e["e"] == "tex"}
 
     def pipe_name(pso):
         p = pipes.get(pso, {})
@@ -76,6 +77,12 @@ def main(path, top=30):
                 current[e["enc"]] = enc
         elif e["e"] in ("d", "rps") and e.get("enc") in current:
             current[e["enc"]]["names"][pipe_name(e.get("pso"))] += 1
+        elif e["e"] == "blit" and e.get("enc") in current:
+            t = tex.get(e.get("dst")) or tex.get(e.get("src"))
+            what = f" {t['w']}x{t['h']} {t['fmt']}" if t else ""
+            current[e["enc"]]["names"][f"{e['op']}{what}"] += 1
+            current[e["enc"]].setdefault("bytes", 0)
+            current[e["enc"]]["bytes"] += e.get("bytes", 0)
         elif e["e"] == "ee":
             current.pop(e.get("enc"), None)
     if not encoders:
@@ -107,6 +114,8 @@ def main(path, top=30):
     print(f"\n| Encoder (longest {top}) | Kind | Family | GPU ms | Kernels / pipelines |\n| ---: | --- | --- | ---: | --- |")
     for i, x in enumerate(sorted(encoders, key=lambda x: x["start"] - x["end"])[:top]):
         names = ", ".join(f"{n} x{c}" if c > 1 else n for n, c in x["names"].most_common(4))
+        if x.get("bytes"):
+            names = f"{x['bytes'] / 2**20:.1f} MiB: " + names
         print(f"| {i + 1} | {x['kind']} | {x['family']} | {ms(x['end'] - x['start']):.2f} | {names[:160]} |")
 
 

@@ -15,6 +15,7 @@
 #include <sstream>
 
 #include "Config.hpp"
+#include "ConfigVars.hpp"
 #include "Denoise.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
@@ -26,8 +27,21 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
 
 namespace MetalFXDenoiser {
 
-// The player's choice: the denoiser on, and the debug view of the noisy lighting.
-std::atomic<bool> s_denoiser{false}, s_noisy{false}, s_menuRegistered{false};
+// The player's choice: the denoiser on, the debug view of the noisy lighting, and MetalFX's 3x render scale.
+std::atomic<bool> s_denoiser{false}, s_noisy{false}, s_ultra{false}, s_menuRegistered{false};
+
+// MetalFX at 3x: the engine's upscaler scale table has a fourth entry (3.0, "Ultra Performance") that the game's
+// menu does not offer; MFX/OverrideEnable makes the engine take the quality from MFX/Quality (1-4) instead of the
+// settings (docs/PIPELINE_TRACE_FINDINGS.md). Both are verified config variables; off restores the settings' preset.
+void ApplyUltra()
+{
+    if (s_ultra.load()) {
+        ConfigVars::Apply("MFX/Quality=4");
+        ConfigVars::Apply("MFX/OverrideEnable=1");
+    } else {
+        ConfigVars::Apply("MFX/OverrideEnable=0");
+    }
+}
 
 void ApplyMode()
 {
@@ -47,6 +61,12 @@ void OnNoisyToggle(const ModMenuEntryPath*, bool on)
 {
     s_noisy.store(on);
     ApplyMode();
+}
+
+void OnUltraToggle(const ModMenuEntryPath*, bool on)
+{
+    s_ultra.store(on);
+    ApplyUltra();
 }
 
 bool Initialize()
@@ -69,6 +89,7 @@ bool Initialize()
 
     // The denoiser runs in the Metal hooks; so does the research tracer ([debug] trace_metal_compute, METALFX_TRACE=1).
     s_denoiser.store(config.enabled);
+    s_ultra.store(config.ultraPerformance);
     s_noisy.store(config.debug.noisyLighting);
     const bool denoiser = Denoise::Supported();
     if (denoiser) {
@@ -80,6 +101,11 @@ bool Initialize()
     if (denoiser || config.debug.traceMetalCompute || (traceEnv && traceEnv[0] == '1')) {
         MetalTrace::Install();
         MetalTrace::LogPerformance(config.debug.logPerformance > 0 ? config.debug.logPerformance : 0);
+        MetalTrace::OnFirstFrame([] {
+            if (s_ultra.load()) { // only when chosen: never touch the engine's settings otherwise
+                ApplyUltra();
+            }
+        });
     }
     if (denoiser) {
         // ModMenu calls ModMenu_Register itself if it loaded first; otherwise register here.
@@ -124,12 +150,17 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                         .title = {"Apple MetalFX denoiser (RT and path tracing, MetalFX upscaling)"},
                                         .defaultValue = MetalFXDenoiser::s_denoiser.load(),
                                         .onChanged = &MetalFXDenoiser::OnDenoiserToggle};
+    const ModMenuToggleInfo ultra = {.entryId = {"ultra_performance"},
+                                     .title = {"Ultra Performance: render at 1/3 resolution (MetalFX 3x)"},
+                                     .defaultValue = MetalFXDenoiser::s_ultra.load(),
+                                     .onChanged = &MetalFXDenoiser::OnUltraToggle};
     const ModMenuToggleInfo noisy = {.entryId = {"noisy_lighting"},
                                      .title = {"Debug: noisy lighting (no denoiser)"},
                                      .defaultValue = MetalFXDenoiser::s_noisy.load(),
                                      .onChanged = &MetalFXDenoiser::OnNoisyToggle};
     const bool ok = api->RegisterMod(&mod) && api->RegisterPage("MetalFXDenoiser", &page) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &denoiser) &&
+                    api->RegisterToggle("MetalFXDenoiser", "main", &ultra) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");
     return ok;

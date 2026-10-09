@@ -7,6 +7,11 @@
 # Also switchable in game: ModMenu (` or F10) > MetalFX Denoiser; ModMenu saves that choice and it wins over this one.
 enabled = true
 
+# Render at a third of the output resolution and let MetalFX upscale 3x (the engine's "Ultra Performance" scale, which
+# the game's menu does not offer). With the denoiser, path tracing at 3456x2160 goes from about 50 to about 28 ms.
+# Needs Resolution Scaling set to MetalFX. Also in ModMenu.
+ultra_performance = false
+
 [debug]
 # Show the noisy lighting (NRD off, no denoiser): for comparisons only.
 noisy_lighting = false

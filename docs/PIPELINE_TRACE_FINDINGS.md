@@ -210,3 +210,35 @@ input), and frame time only in path tracing.
 - Name the 174 order-only and 47 unnamed static kernels (the extra keys of multi-permutation records).
 - Settings changed at runtime (UserSettings) read back as changed but do not switch the ray tracing renderer; rtbench
   therefore sets each mode before launch.
+
+## Native resolution, GPU time per pass, and a hidden 3x render scale (2026-10-08)
+
+Measured at the player's resolution in a background window (`CP_RESOLUTION=3456x2160` for RED4ext's cp-run), path
+tracing, MetalFX Performance (1728x1080 rendered): about 50 ms per frame, GPU-bound (GPU busy 51 ms of a 49.6 ms
+frame; the stock denoiser). `profile` requests time every encoder with GPU timestamps (stage boundary sampling; render
+passes by their fragment stage) and `scripts/gpu_profile.py` groups them:
+
+| Part (stock NRD) | Performance, 1728x1080 | 3x, 1152x720 |
+| --- | ---: | ---: |
+| Path tracing (wavefront trace and shade) | 13.5 | 7.1 |
+| NRD encoder (RELAX about 7 at Performance, plus SIGMA, REBLUR, preparation) | 10.1 | 4.3 |
+| RTXDI (with its shadow rays) | 6.2 | 3.1 |
+| Raster passes | 5.2 | 3.1 |
+| ReSTIR GI | 4.4 | 2.0 |
+| Copies | 4.0 | 1.9 |
+| Other compute | 3.0 | 2.7 |
+| MetalFX temporal scaler | 2.0 | 1.3 |
+| Lights, volumetrics, RT shadows, post, particles, SSR | about 6 | about 4 |
+| **GPU busy per frame** | **50** | **27.6** |
+
+- At native resolution Apple's denoised scaler (about 9 ms: neural network convolutions about 3 ms, filtering about
+  3 ms, MetalFX passes) costs what RELAX plus the MetalFX upscaler cost: the swap is neutral for speed there.
+- **Hidden 3x scale.** The engine maps the upscaler quality index to a scale with a table
+  `[1.5, 1.7, 2.0, 3.0]` (`__TEXT,__const` 0x106B40E60; lookup `q - 1` for q in 1..4, else 0). The quality comes
+  from the player's settings unless `<upscaler>/OverrideEnable` is nonzero, then from `<upscaler>/Quality`
+  (disassembly of the FSR2 path at 0x100E4DAF4). `MFX/OverrideEnable=1` with `MFX/Quality=4` (both verified config
+  variables) renders MetalFX at 3x ("Ultra Performance", not in the game's menu): 1152x720 for 3456x2160, 27.6 ms.
+- `MFX/MirrorScaling` is not a render scale: it scales in-game mirror rendering when MetalFX is on.
+- Redundant raster features under path tracing (`Developer/FeatureToggles`, cvarbatch at native resolution with the
+  denoiser): each within about +-1 ms of the noise (the frame drifted 49-64 ms over the batch, likely thermal);
+  screen-space reflections showed -2.8 / -3.4 ms but cost about 0.9 ms in the per-pass profile. Not a lever.

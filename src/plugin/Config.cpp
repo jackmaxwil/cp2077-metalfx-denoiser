@@ -111,6 +111,8 @@ bool Load(const std::string& path) {
         if (currentSection == "metalfx") {
             if (key == "enabled") {
                 s_settings.enabled = ParseBool(value);
+            } else if (key == "ultra_performance") {
+                s_settings.ultraPerformance = ParseBool(value);
             } else if (key == "quality") {
                 s_settings.quality = QualityFromString(value);
             } else if (key == "sharpness") {

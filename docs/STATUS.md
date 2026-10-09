@@ -100,6 +100,17 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
 5. **Settings:** once the registry is reachable (1b), measure the hidden settings (half resolution tracing, path
    tracing rays and bounces, the Apple denoiser masks) with passcost and rtbench.
 
+## Path to 60: progress (2026-10-08)
+
+- Step 0 done: per-encoder GPU profiler (`profile`), play-time frame log, native resolution runs in a background
+  window. Native path tracing at Performance: 50 ms, GPU-bound (PIPELINE_TRACE_FINDINGS.md has the breakdown).
+- Step 1: the redundant raster features (FeatureToggles) are each within noise: not a lever.
+- Step 2 done, the big one: the engine's hidden 3x MetalFX scale (`MFX/OverrideEnable=1`, `MFX/Quality=4`) switches
+  at runtime: 49.8 to 27.7 ms (stock denoiser), 28.2 ms with the Apple denoiser, at 3456x2160. Softer image. Player
+  setting: `[metalfx] ultra_performance`, ModMenu "Ultra Performance".
+- Remaining at 3x: path tracing 7.1, NRD 4.3, raster 3.1, RTXDI 3.1, other compute 2.7, ReSTIR GI 2.0, copies 1.9,
+  MetalFX 1.3, the rest about 4 ms. 16.7 ms needs another 11 ms.
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.
