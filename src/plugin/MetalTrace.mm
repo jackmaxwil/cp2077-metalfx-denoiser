@@ -945,6 +945,10 @@ void PollRequests(uint64_t frame)
         if (!ConfigVars::SetUltraScale(std::strtof(name.c_str(), nullptr), why)) {
             Logger::Warn("Metal trace: ultrascale " + name + ": " + why);
         }
+    } else if (kind == "denoiseinputs") {
+        Denoise::SaveInputs();
+    } else if (kind == "denoisepair") {
+        Denoise::SetPairOrder(name == "slotrev" ? 1 : name == "addr" ? 2 : 0);
     } else if (kind == "sharpen") {
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
@@ -1458,6 +1462,11 @@ void WritePng(const std::string& path, const std::vector<uint8_t>& rgba, size_t 
 // Converts one texture's bytes to RGBA8 (and its alpha channel to a second image, when it has one).
 void ConvertAndWrite(const uint8_t* src, size_t w, size_t h, NSUInteger f, const std::string& base)
 {
+    if (base.find("-raw") != std::string::npos) { // the texels as they are (names with "-raw": research)
+        std::ofstream(base + ".bin", std::ios::binary).write(reinterpret_cast<const char*>(src),
+                                                            static_cast<std::streamsize>(w * h * BytesPerPixel(f)));
+        return;
+    }
     std::vector<uint8_t> rgb(w * h * 4, 255), alpha;
     const size_t bpp = BytesPerPixel(f);
     const bool hasAlpha = f == 70 || f == 71 || f == 80 || f == 81 || f == 90 || f == 94 || f == 110 || f == 115 ||

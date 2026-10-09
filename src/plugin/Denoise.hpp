@@ -22,6 +22,10 @@ void SetWatch(bool on);
 // its MetalFX path, which the denoised scaler replaces.
 void SetSharpness(float amount);
 bool Active();
+// The next denoised scaler call's inputs (color and guides) as PNGs in the trace folder (dsin-*). Request "denoiseinputs".
+void SaveInputs();
+// RELAX pass-through pairing: 0 binding slots (default), 1 slots reversed, 2 object address. Request "denoisepair".
+void SetPairOrder(int order);
 // The projection of the latest ray traced frame (from NRD's constants): vertical field of view in degrees, near plane,
 // aspect ratio; false before the first.
 bool Projection(float& fovY, float& nearPlane, float& aspect);

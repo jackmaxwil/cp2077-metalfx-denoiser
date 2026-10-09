@@ -105,6 +105,7 @@ struct Enc {
     bool open = false;
     int atrous = 0;
     bool kept = false; // the chain's keep pass has run
+    bool inBySlot = false; // the copy sources were ordered by binding slot (not address)
     bool hudComposite = false; // the game's HUD composite ran in this encoder (FrameGen::HudComposite)
     std::vector<id<MTLTexture>> in, out;
     std::vector<Job> jobs;
@@ -112,6 +113,7 @@ struct Enc {
 
 std::mutex g_mutex;
 std::unordered_map<const void*, Enc> g_enc;
+std::atomic<bool> g_saveInputs{false}; // SaveInputs
 id<MTLTexture> g_gbuf[3];
 std::atomic<int> g_logged{0};
 bool g_failed = false; // fx: setup failed, the game's scaler runs
@@ -235,7 +237,35 @@ bool MakePipelines(id<MTLDevice> device)
 }
 
 // The RGBA16Float textures among an encoder's declarations, read-only or written, ordered by address.
-std::vector<id<MTLTexture>> Pick(const Enc& e, bool written)
+// Where a texture is bound in the dispatch's descriptor tables (Metal Shader Converter layout: the top-level argument
+// buffer holds table addresses; 24-byte entries, the texture's resource ID at +8): (table << 16) | entry, the shader's
+// own order. ~0 when not found.
+uint64_t U64(const uint8_t* p);
+
+uint64_t SlotOf(const Enc& e, id<MTLTexture> t)
+{
+    id<MTLBuffer> root = e.root;
+    if (!root || root.storageMode == MTLStorageModePrivate || e.rootOffset + 128 > root.length) {
+        return ~0ull;
+    }
+    const uint64_t rid = t.gpuResourceID._impl;
+    const uint8_t* args = static_cast<const uint8_t*>(root.contents) + e.rootOffset;
+    for (int i = 0; i < 16; ++i) {
+        const uint8_t* table = MetalTrace::MapGpuAddress(U64(args + 8 * i), 24 * 64);
+        for (int j = 0; table && j < 64; ++j) {
+            if (U64(table + 24 * j + 8) == rid) {
+                return (static_cast<uint64_t>(i) << 16) | static_cast<uint64_t>(j);
+            }
+        }
+    }
+    return ~0ull;
+}
+
+// Pairing order of the copy sources and outputs: 0 the shaders' binding slots (default), 1 slots reversed, 2 object
+// address (the old order; it depends on allocation and swapped diffuse and specular). Request "denoisepair".
+std::atomic<int> g_pairOrder{0};
+
+std::vector<id<MTLTexture>> Pick(const Enc& e, bool written, bool* bySlot = nullptr)
 {
     std::vector<id<MTLTexture>> out;
     for (const auto& [r, usage] : e.uses) {
@@ -246,12 +276,35 @@ std::vector<id<MTLTexture>> Pick(const Enc& e, bool written)
         }
     }
     std::sort(out.begin(), out.end(), [](id a, id b) { return (__bridge void*)a < (__bridge void*)b; });
+    if (g_pairOrder.load() != 2) {
+        std::vector<std::pair<uint64_t, id<MTLTexture>>> slots;
+        for (id<MTLTexture> t : out) {
+            slots.emplace_back(SlotOf(e, t), t);
+        }
+        if (std::all_of(slots.begin(), slots.end(), [](auto& s) { return s.first != ~0ull; })) {
+            std::sort(slots.begin(), slots.end(), [](auto& a, auto& b) { return a.first < b.first; });
+            if (g_pairOrder.load() == 1) {
+                std::reverse(slots.begin(), slots.end());
+            }
+            for (size_t i = 0; i < slots.size(); ++i) {
+                out[i] = slots[i].second;
+            }
+            if (bySlot) {
+                *bySlot = true;
+            }
+        } else {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                Logger::Warn("Denoise: a RELAX texture is not in its descriptor tables; paired by address");
+            }
+        }
+    }
     return out;
 }
 
 void Close(Enc& e)
 {
-    if (e.chain->reverse && e.kept) {
+    if (e.chain->reverse && e.kept && !e.inBySlot) { // the address order's known swap
         std::reverse(e.in.begin(), e.in.end());
     }
     if (e.in.size() == e.chain->width && e.out.size() == e.chain->width) {
@@ -417,6 +470,17 @@ void SetWatch(bool on)
     g_watch.store(on);
 }
 
+void SaveInputs()
+{
+    g_saveInputs.store(true);
+}
+
+void SetPairOrder(int order)
+{
+    g_pairOrder.store(order);
+    Logger::Info("Denoise: RELAX pairing by " + std::string(order == 0 ? "binding slot" : order == 1 ? "binding slot, reversed" : "address"));
+}
+
 bool Active()
 {
     return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);
@@ -504,13 +568,15 @@ bool Dispatch(id encoder)
                 e.in = Pick(e, false); // the noisy inputs
                 drop = true;
             } else if (e.label == c->keep) {
-                e.in = Pick(e, true); // the keep pass's output
+                e.inBySlot = false;
+                e.in = Pick(e, true, &e.inBySlot); // the keep pass's output
                 e.kept = true;
             }
         }
     } else if (e.open && e.chain->keep && !e.kept) {
         if (e.label == e.chain->keep) {
-            e.in = Pick(e, true);
+            e.inBySlot = false;
+            e.in = Pick(e, true, &e.inBySlot);
             e.kept = true;
         }
     } else if (e.open && e.label == e.chain->end) {
@@ -728,6 +794,15 @@ bool EncodeScaler(id scaler, id commandBuffer)
         ds.shouldResetHistory = s.reset;
         ds.worldToViewMatrix = worldToView;
         ds.viewToClipMatrix = viewToClip;
+        if (g_saveInputs.exchange(false)) { // request "denoiseinputs": what the denoised scaler gets, as PNGs
+            MetalTrace::SaveTexture(commandBuffer, color, "dsin-color");
+            MetalTrace::SaveTexture(commandBuffer, color, "dsin-color-raw");
+            MetalTrace::SaveTexture(commandBuffer, motion, "dsin-motion-raw");
+            MetalTrace::SaveTexture(commandBuffer, g_diffuse, "dsin-diffuse");
+            MetalTrace::SaveTexture(commandBuffer, g_specular, "dsin-specular");
+            MetalTrace::SaveTexture(commandBuffer, g_normal, "dsin-normal");
+            MetalTrace::SaveTexture(commandBuffer, g_roughness, "dsin-roughness");
+        }
         [ds encodeToCommandBuffer:commandBuffer];
         Sharpen(commandBuffer, output);
         return true;
