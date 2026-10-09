@@ -20,6 +20,10 @@ texture_lod_bias = 0.0
 # of the 3x upscale. The game's own sharpening setting does not apply with the denoiser. Also in ModMenu.
 sharpness = 0.0
 
+# Render scale of ultra_performance: 3.0 (the engine's hidden "Ultra Performance") down to 2.0. 2.5 renders 1382x864 for
+# 3456x2160: fewer jagged edges and more texture detail than 3.0, for more GPU time per frame.
+ultra_scale = 3.0
+
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false

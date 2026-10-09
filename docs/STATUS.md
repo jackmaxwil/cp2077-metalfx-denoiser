@@ -178,6 +178,26 @@ only with frame generation). Measured:
 - Test-tool fix: PNG dumps are converted off Metal's completion thread (4K conversions there held up the game's
   drawables and tripped frame generation's safety valve).
 
+## Render scale between 2x and 3x (2026-10-08)
+
+The game's resolution settings stop at 50% (DRS_MinResolution 50-100), so scales above 2x exist only through the
+engine's scale table. It is now a verified address DB entry, "Upscaler/ScaleTable" (RED4ext.SDK
+scripts/upscaler_scale_table.py: the 16 bytes [1.5, 1.7, 2.0, 3.0] occur once in __TEXT,__const; six ADRP + ADD
+references in the upscalers' code). `ConfigVars::SetUltraScale` rewrites its fourth entry (quality 4, reached only
+through MFX/OverrideEnable + MFX/Quality=4), after checking the table in memory, with a copy-on-write page protection
+change (the 16 KB page holds only constants). It takes effect on the next frame. Setting `ultra_scale`, ModMenu slider
+(2 to 3 in steps of 0.25), request `ultrascale <scale>`, scenario `ultrascale` (RED4ext).
+
+Path tracing with the denoiser, no frame generation, frozen spot:
+
+| Scale | Render size | Frame | GPU busy |
+| --- | --- | ---: | ---: |
+| 3 | 1152x720 | 28.3 ms | 47.5 ms |
+| 2.75 | 1257x785 | 31.7 ms | 53.2 ms |
+| 2.5 | 1382x864 | 37.5 ms | 63.4 ms |
+
+Player report at 3x with sharpening 0.4, texture LOD bias -0.585 and frame generation: looks great, very smooth.
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.

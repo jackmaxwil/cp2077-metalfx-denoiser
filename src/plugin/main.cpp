@@ -34,9 +34,16 @@ std::atomic<bool> s_denoiser{false}, s_noisy{false}, s_ultra{false}, s_menuRegis
 // MetalFX at 3x: the engine's upscaler scale table has a fourth entry (3.0, "Ultra Performance") that the game's
 // menu does not offer; MFX/OverrideEnable makes the engine take the quality from MFX/Quality (1-4) instead of the
 // settings (docs/PIPELINE_TRACE_FINDINGS.md). Both are verified config variables; off restores the settings' preset.
+std::atomic<float> s_ultraScale{3.0f};
+
 void ApplyUltra()
 {
     if (s_ultra.load()) {
+        const char* env = std::getenv("METALFX_ULTRA_SCALE");
+        const float scale = env && *env ? std::strtof(env, nullptr) : s_ultraScale.load();
+        if (std::string why; !ConfigVars::SetUltraScale(scale, why)) {
+            Logger::Warn("Ultra performance: scale " + std::to_string(scale) + " not applied (" + why + ")");
+        }
         ConfigVars::Apply("MFX/Quality=4");
         ConfigVars::Apply("MFX/OverrideEnable=1");
     } else {
@@ -78,6 +85,12 @@ void OnFrameGenToggle(const ModMenuEntryPath*, bool on)
     FrameGen::SetEnabled(on);
 }
 
+void OnUltraScaleChanged(const ModMenuEntryPath*, float value)
+{
+    s_ultraScale.store(value);
+    ApplyUltra();
+}
+
 void OnSharpnessChanged(const ModMenuEntryPath*, float value)
 {
     if (const char* env = std::getenv("METALFX_SHARPNESS"); env && *env) { // tests set it themselves
@@ -107,6 +120,7 @@ bool Initialize()
     // The denoiser runs in the Metal hooks; so does the research tracer ([debug] trace_metal_compute, METALFX_TRACE=1).
     s_denoiser.store(config.enabled);
     s_ultra.store(config.ultraPerformance);
+    s_ultraScale.store(config.ultraScale);
     if (const char* env = std::getenv("METALFX_FRAMEGEN"); !env || !*env) {
         FrameGen::SetEnabled(config.frameGeneration);
     }
@@ -182,6 +196,13 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                         .title = {"Frame generation: one generated frame per rendered frame (MetalFX)"},
                                         .defaultValue = FrameGen::Enabled(),
                                         .onChanged = &MetalFXDenoiser::OnFrameGenToggle};
+    const ModMenuSliderInfo ultraScale = {.entryId = {"ultra_scale"},
+                                          .title = {"Ultra Performance render scale (3 = 1/3 resolution, lower = sharper, slower)"},
+                                          .minValue = 2.0f,
+                                          .maxValue = 3.0f,
+                                          .step = 0.25f,
+                                          .defaultValue = Config::Get().ultraScale,
+                                          .onChanged = &MetalFXDenoiser::OnUltraScaleChanged};
     const ModMenuSliderInfo sharpness = {.entryId = {"sharpness"},
                                          .title = {"Sharpening after the Apple denoiser (0 = off)"},
                                          .minValue = 0.0f,
@@ -196,6 +217,7 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
     const bool ok = api->RegisterMod(&mod) && api->RegisterPage("MetalFXDenoiser", &page) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &denoiser) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &ultra) &&
+                    api->RegisterSlider("MetalFXDenoiser", "main", &ultraScale) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
                     api->RegisterSlider("MetalFXDenoiser", "main", &sharpness) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);

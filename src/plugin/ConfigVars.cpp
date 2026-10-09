@@ -16,6 +16,9 @@
 #include <cstring>
 #include <string>
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
 namespace {
 
 uint32_t Fnv1a32(const std::string& text)
@@ -132,6 +135,44 @@ std::string Apply(const std::string& request)
                  (eq != std::string::npos ? " -> " + after : ""));
     return "{\"var\":\"" + path + "\",\"type\":\"" + TypeName(v.type) + "\",\"before\":\"" + before +
            "\",\"after\":\"" + after + "\"}";
+}
+
+bool SetUltraScale(float scale, std::string& why)
+{
+    if (!(scale >= 2.0f && scale <= 3.0f)) {
+        why = "scale outside 2.0-3.0";
+        return false;
+    }
+    const auto address = RED4ext::UniversalRelocBase::Resolve(Fnv1a32("Upscaler/ScaleTable"));
+    if (!address) {
+        why = "Upscaler/ScaleTable is not a verified entry in the address DB";
+        return false;
+    }
+    auto* table = reinterpret_cast<float*>(address);
+    if (table[0] != 1.5f || table[1] != 1.7f || table[2] != 2.0f || !(table[3] >= 2.0f && table[3] <= 3.0f)) {
+        why = "the table in memory does not read [1.5, 1.7, 2.0, 2..3]";
+        return false;
+    }
+    if (table[3] == scale) {
+        return true;
+    }
+    // __TEXT,__const is read-only: copy-on-write the page, write, and give it back its original protection. The page
+    // holds only constants (no code), so no thread executes from it while it is writable.
+    const mach_vm_address_t page = address & ~static_cast<uintptr_t>(vm_page_size - 1);
+    kern_return_t kr = mach_vm_protect(mach_task_self(), page, vm_page_size, FALSE,
+                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        why = "mach_vm_protect(RW|COPY) failed: " + std::to_string(kr);
+        return false;
+    }
+    const float before = table[3];
+    table[3] = scale;
+    kr = mach_vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        Logger::Error("Upscaler scale table: restoring R|X failed: " + std::to_string(kr));
+    }
+    Logger::Info("Upscaler scale table: quality 4 " + std::to_string(before) + " -> " + std::to_string(scale));
+    return true;
 }
 
 } // namespace ConfigVars

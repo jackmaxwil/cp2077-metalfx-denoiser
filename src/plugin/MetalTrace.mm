@@ -939,6 +939,11 @@ void PollRequests(uint64_t frame)
         }
     } else if (kind == "framegen") {
         FrameGen::SetEnabled(name == "on");
+    } else if (kind == "ultrascale") {
+        std::string why;
+        if (!ConfigVars::SetUltraScale(std::strtof(name.c_str(), nullptr), why)) {
+            Logger::Warn("Metal trace: ultrascale " + name + ": " + why);
+        }
     } else if (kind == "sharpen") {
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
