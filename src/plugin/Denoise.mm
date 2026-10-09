@@ -481,6 +481,11 @@ void SetPairOrder(int order)
     Logger::Info("Denoise: RELAX pairing by " + std::string(order == 0 ? "binding slot" : order == 1 ? "binding slot, reversed" : "address"));
 }
 
+bool Hooked()
+{
+    return Active() || FrameGen::Enabled();
+}
+
 bool Active()
 {
     return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);

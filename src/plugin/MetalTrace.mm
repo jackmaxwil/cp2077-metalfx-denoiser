@@ -2167,7 +2167,7 @@ void H_setCps(id self, SEL sel, id pso)
         t_enc = (__bridge const void*)self;
         t_drop = s_skipPipes.count((__bridge const void*)pso) != 0;
     }
-    if (Denoise::Active()) {
+    if (Denoise::Hooked()) {
         std::string label;
         {
             std::shared_lock<std::shared_mutex> pipes(s_pipesMutex);
@@ -2408,7 +2408,7 @@ void H_dispTG(id self, SEL sel, MTLSize groups, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "tg", groups, threads);
     }
-    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Hooked() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispTG, Disp, self)(self, sel, groups, threads);
@@ -2419,7 +2419,7 @@ void H_dispTh(id self, SEL sel, MTLSize grid, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "th", grid, threads);
     }
-    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Hooked() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispTh, Disp, self)(self, sel, grid, threads);
@@ -2430,7 +2430,7 @@ void H_dispInd(id self, SEL sel, id buffer, NSUInteger offset, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "ind", MTLSizeMake(0, 0, 0), threads);
     }
-    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Hooked() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispInd, DispInd, self)(self, sel, buffer, offset, threads);
@@ -2448,7 +2448,7 @@ void H_exec(id self, SEL sel, id icb, NSRange range)
 
 void H_endEnc(id self, SEL sel)
 {
-    if (Denoise::Active()) {
+    if (Denoise::Hooked()) {
         Denoise::EndEncoding(self);
     }
     id dumpCb = nil;

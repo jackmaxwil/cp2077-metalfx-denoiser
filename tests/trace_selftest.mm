@@ -298,7 +298,7 @@ kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p
             if (!comp || !composited) {
                 return Fail("HUD composite stand-in");
             }
-            Denoise::SetMode("pass"); // the encoder hooks feed Denoise, which finds the composite
+            // Denoiser off: frame generation alone must find the composite through the encoder hooks.
             FrameGen::SetHudDebug(true);
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
@@ -331,7 +331,6 @@ kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p
             }
             FrameGen::SetEnabled(false);
             FrameGen::SetHudDebug(false);
-            Denoise::SetMode("off");
             if (FrameGen::Generated() - before < 8) {
                 std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
                 return Fail("frame generation produced no frames");

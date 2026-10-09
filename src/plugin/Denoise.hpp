@@ -22,6 +22,8 @@ void SetWatch(bool on);
 // its MetalFX path, which the denoised scaler replaces.
 void SetSharpness(float amount);
 bool Active();
+// The encoder hooks feed Denoise: while active, and while frame generation needs the game's HUD composite found.
+bool Hooked();
 // The next denoised scaler call's inputs (color and guides) as PNGs in the trace folder (dsin-*). Request "denoiseinputs".
 void SaveInputs();
 // RELAX pass-through pairing: 0 binding slots (default), 1 slots reversed, 2 object address. Request "denoisepair".
