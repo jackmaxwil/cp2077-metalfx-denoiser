@@ -19,6 +19,9 @@ bool SetCameraMode(const std::string& mode);
 // Read the camera even when off (motion tests).
 void SetWatch(bool on);
 bool Active();
+// The projection of the latest ray traced frame (from NRD's constants): vertical field of view in degrees, near plane,
+// aspect ratio; false before the first.
+bool Projection(float& fovY, float& nearPlane, float& aspect);
 // The camera of the latest ray traced frame (NRD's gCameraDelta and gViewToWorld); false before the first.
 bool Camera(float delta[4], float viewToWorld[16], uint64_t& serial);
 

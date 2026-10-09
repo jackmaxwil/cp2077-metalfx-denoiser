@@ -113,6 +113,8 @@ bool Load(const std::string& path) {
                 s_settings.enabled = ParseBool(value);
             } else if (key == "ultra_performance") {
                 s_settings.ultraPerformance = ParseBool(value);
+            } else if (key == "frame_generation") {
+                s_settings.frameGeneration = ParseBool(value);
             } else if (key == "quality") {
                 s_settings.quality = QualityFromString(value);
             } else if (key == "sharpness") {

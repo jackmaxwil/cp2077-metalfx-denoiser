@@ -12,6 +12,10 @@ enabled = true
 # Needs Resolution Scaling set to MetalFX. Also in ModMenu.
 ultra_performance = false
 
+# Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
+# the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
+frame_generation = false
+
 [debug]
 # Show the noisy lighting (NRD off, no denoiser): for comparisons only.
 noisy_lighting = false

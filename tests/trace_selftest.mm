@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "Denoise.hpp"
+#include "FrameGen.hpp"
+#import <MetalFX/MetalFX.h>
 #include "MetalTrace.hpp"
 
 static const char* kSource = R"(
@@ -221,6 +223,64 @@ int main()
                 ts.find("\"samples\":[null") != std::string::npos || tr.find("\"ts\":0") == std::string::npos) {
                 std::fprintf(stderr, "%s\n", ts.substr(0, 300).c_str());
                 return Fail("profile timestamps missing");
+            }
+        }
+
+        // Frame generation: with a MetalFX temporal scaler call and a present every frame, frames are generated (the
+        // first presents only turn off the layer's framebufferOnly and fill the history).
+        {
+            MTLFXTemporalScalerDescriptor* sd = [[MTLFXTemporalScalerDescriptor new] autorelease];
+            sd.colorTextureFormat = MTLPixelFormatRGBA16Float;
+            sd.depthTextureFormat = MTLPixelFormatDepth32Float;
+            sd.motionTextureFormat = MTLPixelFormatRG16Float;
+            sd.outputTextureFormat = MTLPixelFormatRGBA16Float;
+            sd.inputWidth = 32;
+            sd.inputHeight = 16;
+            sd.outputWidth = 64;
+            sd.outputHeight = 32;
+            id<MTLFXTemporalScaler> ts = [sd newTemporalScalerWithDevice:dev];
+            MTLTextureDescriptor* fd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                          width:32
+                                                                                         height:16
+                                                                                      mipmapped:NO];
+            fd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            fd.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> fc = [dev newTextureWithDescriptor:fd];
+            fd.pixelFormat = MTLPixelFormatRG16Float;
+            id<MTLTexture> fm = [dev newTextureWithDescriptor:fd];
+            fd.pixelFormat = MTLPixelFormatDepth32Float;
+            id<MTLTexture> fz = [dev newTextureWithDescriptor:fd];
+            fd.pixelFormat = MTLPixelFormatRGBA16Float;
+            fd.width = 64;
+            fd.height = 32;
+            fd.usage = ts.outputTextureUsage | MTLTextureUsageShaderRead;
+            id<MTLTexture> fo = [dev newTextureWithDescriptor:fd];
+            CAMetalLayer* fl = [CAMetalLayer layer];
+            fl.device = dev;
+            fl.pixelFormat = MTLPixelFormatRGBA16Float;
+            fl.drawableSize = CGSizeMake(64, 32);
+            FrameGen::SetEnabled(true);
+            const auto before = FrameGen::Generated();
+            for (int frame = 0; frame < 12; ++frame) {
+                @autoreleasepool {
+                    id<MTLCommandBuffer> cb = [queue commandBuffer];
+                    ts.colorTexture = fc;
+                    ts.depthTexture = fz;
+                    ts.motionTexture = fm;
+                    ts.outputTexture = fo;
+                    [ts encodeToCommandBuffer:cb];
+                    id<CAMetalDrawable> drawable = [fl nextDrawable];
+                    if (drawable) {
+                        [cb presentDrawable:drawable];
+                    }
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                }
+            }
+            FrameGen::SetEnabled(false);
+            if (FrameGen::Generated() - before < 8) {
+                std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
+                return Fail("frame generation produced no frames");
             }
         }
 

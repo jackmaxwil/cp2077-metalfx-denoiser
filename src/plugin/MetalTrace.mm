@@ -21,7 +21,7 @@
 //   (tracing runs only; tools/rtbench writes it for RTBENCH_CVARS and deletes it afterwards).
 //
 // Requests are files in <plugin dir>/trace/: "req-*" containing "trace <name>", "profile <name>" (trace plus GPU time per encoder), "perf <name> <frames>",
-// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
+// "capture <name>", "dump <name> [pipelines]" (trace plus PNGs of render targets and chosen dispatches' textures, see s_dump), "skip listed|refit|raygen|metalfx|off", "denoise off|pass|fx", "denoisecam game|identity|rh", "denoiseprepass on|off" (Denoise.mm), "framegen on|off" (FrameGen.mm), "motion <name>" (see MotionTick), "shot <name>" (the next frame's upscaler output), "cvar <group>/<name>[=<value>]" (engine config
 // variables, ConfigVars.cpp; results appended to cvar.jsonl) or "cvarbatch" (experiments from cvar-experiments.txt,
 // see StartBatch). Results are written next to them: <name>.trace.jsonl, <name>.perf.json, <name>.gputrace.
 // tools/cp-run writes the requests for scenario scripts.
@@ -31,6 +31,7 @@
 #include "MetalTrace.hpp"
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
+#include "FrameGen.hpp"
 #include "Logger.hpp"
 
 #import <Metal/Metal.h>
@@ -919,6 +920,8 @@ void PollRequests(uint64_t frame)
         if (!Denoise::SetMode(name)) {
             Logger::Warn("Metal trace: unknown denoise mode " + name);
         }
+    } else if (kind == "framegen") {
+        FrameGen::SetEnabled(name == "on");
     } else if (kind == "denoiseprepass") {
         Denoise::SetPrepass(name == "on");
     } else if (kind == "denoisecam") {
@@ -1767,6 +1770,14 @@ void H_cbCommit(id self, SEL sel)
 void H_cbPresent(id self, SEL sel, id drawable)
 {
     OnPresent(true);
+    // Frame generation presents a generated frame and then the game's (FrameGen.mm), through the original methods.
+    if (FrameGen::Present(
+            self, drawable, [self, sel](id d) { ORIG(o_cbPresent, V1, self)(self, sel, d); },
+            [self](id d, double after) {
+                ORIG(o_cbPresentAfter, V1T, self)(self, @selector(presentDrawable:afterMinimumDuration:), d, after);
+            })) {
+        return;
+    }
     ORIG(o_cbPresent, V1, self)(self, sel, drawable);
 }
 
@@ -1815,6 +1826,10 @@ using VT = void (*)(id, SEL, CFTimeInterval);
 void H_drPresent(id self, SEL sel)
 {
     OnPresent(false);
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+        Logger::Info("FrameGen: the game presents through -[CAMetalDrawable present] (not supported for frame generation)");
+    }
     ORIG(o_drPresent, V0, self)(self, sel);
 }
 
@@ -2633,6 +2648,7 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
     if (!(Denoise::Active() && Denoise::EncodeScaler(self, cb))) {
         ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
     }
+    FrameGen::AfterScaler(self, cb);
     {
         std::lock_guard<std::mutex> lock(s_capMutex);
         if (!s_shotName.empty()) {
@@ -2733,6 +2749,9 @@ bool Install()
     }
     if (const char* n = std::getenv("METALFX_PERF_EVERY"); n && *n) {
         s_perfEvery = std::strtoull(n, nullptr, 10);
+    }
+    if (const char* f = std::getenv("METALFX_FRAMEGEN"); f && *f) {
+        FrameGen::SetEnabled(f[0] == '1');
     }
     if (const char* m = std::getenv("METALFX_DENOISE"); m && *m) {
         Denoise::SetMode(m);

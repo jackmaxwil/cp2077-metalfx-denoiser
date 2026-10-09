@@ -221,5 +221,65 @@ int main(int argc, char** argv)
             fflush(stdout);
         }
     }
+    // MetalFX frame interpolator: one generated frame from two presented frames (color at the output size, depth and
+    // motion at the render size).
+    @autoreleasepool {
+        id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+        id<MTLCommandQueue> q = [d newCommandQueue];
+        printf("\n| Frame interpolator | Input (depth, motion) | Output | Color format | ms (median/p90) |\n"
+               "| --- | --- | --- | --- | ---: |\n");
+        const struct { NSUInteger iw, ih, ow, oh; MTLPixelFormat color; const char* name; } cases[] = {
+            {1152, 720, 3456, 2160, MTLPixelFormatBGRA8Unorm, "BGRA8Unorm"},
+            {1152, 720, 3456, 2160, MTLPixelFormatRGBA16Float, "RGBA16Float"},
+            {1728, 1080, 3456, 2160, MTLPixelFormatBGRA8Unorm, "BGRA8Unorm"},
+            {779, 487, 1168, 730, MTLPixelFormatBGRA8Unorm, "BGRA8Unorm"},
+        };
+        for (const auto& c : cases) {
+            if (![MTLFXFrameInterpolatorDescriptor supportsDevice:d]) {
+                printf("not supported\n");
+                break;
+            }
+            MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+            fd.colorTextureFormat = c.color;
+            fd.outputTextureFormat = c.color;
+            fd.depthTextureFormat = MTLPixelFormatDepth32Float;
+            fd.motionTextureFormat = MTLPixelFormatRG16Float;
+            fd.inputWidth = c.iw;
+            fd.inputHeight = c.ih;
+            fd.outputWidth = c.ow;
+            fd.outputHeight = c.oh;
+            id<MTLFXFrameInterpolator> fi = [fd newFrameInterpolatorWithDevice:d];
+            if (!fi) {
+                printf("| %s | %lux%lu | %lux%lu | %s | unavailable |\n", "-", (unsigned long)c.iw, (unsigned long)c.ih,
+                       (unsigned long)c.ow, (unsigned long)c.oh, c.name);
+                continue;
+            }
+            const MTLTextureUsage rw = MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+            id<MTLTexture> col = Make(d, c.color, c.ow, c.oh, rw), prev = Make(d, c.color, c.ow, c.oh, rw),
+                           out = Make(d, c.color, c.ow, c.oh, rw),
+                           z = Make(d, MTLPixelFormatDepth32Float, c.iw, c.ih, MTLTextureUsageRenderTarget),
+                           m = Make(d, MTLPixelFormatRG16Float, c.iw, c.ih, rw);
+            Noise(q, col, c.color == MTLPixelFormatRGBA16Float ? 8 : 4);
+            Noise(q, prev, c.color == MTLPixelFormatRGBA16Float ? 8 : 4);
+            Noise(q, m, 4);
+            fi.colorTexture = col;
+            fi.prevColorTexture = prev;
+            fi.depthTexture = z;
+            fi.motionTexture = m;
+            fi.outputTexture = out;
+            fi.motionVectorScaleX = c.iw;
+            fi.motionVectorScaleY = c.ih;
+            fi.deltaTime = 1.0f / 36.0f;
+            fi.nearPlane = 0.02f;
+            fi.farPlane = 10000.0f;
+            fi.fieldOfView = 60.0f;
+            fi.aspectRatio = (float)c.ow / c.oh;
+            fi.depthReversed = YES;
+            Stats st = Time(q, 150, [&](id<MTLCommandBuffer> cb, int) { [fi encodeToCommandBuffer:cb]; });
+            printf("| generated frame | %lux%lu | %lux%lu | %s | %.2f / %.2f |\n", (unsigned long)c.iw,
+                   (unsigned long)c.ih, (unsigned long)c.ow, (unsigned long)c.oh, c.name, st.median, st.p90);
+            fflush(stdout);
+        }
+    }
     return 0;
 }

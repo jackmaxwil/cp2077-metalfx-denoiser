@@ -378,6 +378,22 @@ bool Active()
     return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);
 }
 
+bool Projection(float& fovY, float& nearPlane, float& aspect)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_cam.serial) {
+        return false;
+    }
+    const simd_float4x4 p = simd_mul(g_cam.worldToClip, g_cam.viewToWorld); // view to clip
+    if (p.columns[1][1] <= 0 || p.columns[0][0] <= 0) {
+        return false;
+    }
+    fovY = 2.0f * std::atan(1.0f / p.columns[1][1]) * 57.29578f;
+    aspect = p.columns[1][1] / p.columns[0][0];
+    nearPlane = p.columns[3][2]; // reversed-Z, infinite far plane: clip z = near
+    return nearPlane > 0;
+}
+
 bool Camera(float delta[4], float viewToWorld[16], uint64_t& serial)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

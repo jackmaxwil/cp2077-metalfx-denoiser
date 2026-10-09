@@ -48,6 +48,7 @@ struct Debug {
 struct Settings {
     bool enabled = true;
     bool ultraPerformance = false; // MetalFX at 3x (the engine's hidden Ultra Performance scale)
+    bool frameGeneration = false;  // MetalFX frame interpolation (FrameGen.mm)
     Quality quality = Quality::Quality;
     float sharpness = 0.5f;
     Features features;

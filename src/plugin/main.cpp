@@ -17,6 +17,7 @@
 #include "Config.hpp"
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
+#include "FrameGen.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
 #include "modmenu_api.h" // copy of ModMenu's include/modmenu/modmenu_api.h
@@ -69,6 +70,14 @@ void OnUltraToggle(const ModMenuEntryPath*, bool on)
     ApplyUltra();
 }
 
+void OnFrameGenToggle(const ModMenuEntryPath*, bool on)
+{
+    if (const char* env = std::getenv("METALFX_FRAMEGEN"); env && *env) { // tests set it themselves
+        return;
+    }
+    FrameGen::SetEnabled(on);
+}
+
 bool Initialize()
 {
     if (g_initialized) {
@@ -90,6 +99,9 @@ bool Initialize()
     // The denoiser runs in the Metal hooks; so does the research tracer ([debug] trace_metal_compute, METALFX_TRACE=1).
     s_denoiser.store(config.enabled);
     s_ultra.store(config.ultraPerformance);
+    if (const char* env = std::getenv("METALFX_FRAMEGEN"); !env || !*env) {
+        FrameGen::SetEnabled(config.frameGeneration);
+    }
     s_noisy.store(config.debug.noisyLighting);
     const bool denoiser = Denoise::Supported();
     if (denoiser) {
@@ -154,6 +166,10 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                      .title = {"Ultra Performance: render at 1/3 resolution (MetalFX 3x)"},
                                      .defaultValue = MetalFXDenoiser::s_ultra.load(),
                                      .onChanged = &MetalFXDenoiser::OnUltraToggle};
+    const ModMenuToggleInfo framegen = {.entryId = {"frame_generation"},
+                                        .title = {"Frame generation: one generated frame per rendered frame (MetalFX)"},
+                                        .defaultValue = FrameGen::Enabled(),
+                                        .onChanged = &MetalFXDenoiser::OnFrameGenToggle};
     const ModMenuToggleInfo noisy = {.entryId = {"noisy_lighting"},
                                      .title = {"Debug: noisy lighting (no denoiser)"},
                                      .defaultValue = MetalFXDenoiser::s_noisy.load(),
@@ -161,6 +177,7 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
     const bool ok = api->RegisterMod(&mod) && api->RegisterPage("MetalFXDenoiser", &page) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &denoiser) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &ultra) &&
+                    api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");
     return ok;

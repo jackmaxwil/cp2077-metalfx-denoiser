@@ -126,6 +126,15 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
 - Outlook: path tracing about 24-26 ms (40 fps) with the remaining small wins; RT about 21 ms. Feeling 60 needs a
   lower output resolution or a lighter mode; MetalFX frame interpolation adds smoothness, not responsiveness.
 
+- **Frame generation (2026-10-08, `FrameGen.mm`):** MetalFX frame interpolation between every two presented frames
+  (the game's final RGBA16Float swapchain images with HUD; depth and motion copied at its MetalFX call; near plane, field
+  of view and aspect from NRD's constants). The generated frame goes into an extra drawable, presented first; the game's
+  frame follows half a frame interval later (presentDrawable:afterMinimumDuration:). Interpolator 3.1 ms at
+  1152x720 -> 3456x2160 (bench); in game path tracing at 3x goes from 29.1 to 33.9 ms per rendered frame (the copies
+  and the readable swapchain included): about 29.5 rendered fps, about 59 displayed. 240 of 240 presents generated.
+  Displayed pacing can only be judged on screen (a covered window reports no presented times). The HUD is
+  interpolated with the scene (no separate UI texture). Player setting `[metalfx] frame_generation`, ModMenu toggle.
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.
