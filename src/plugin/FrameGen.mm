@@ -115,8 +115,9 @@ kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
                 b = max(b, low.read(uint2(clamp(int2(p / 16) + int2(x, y), int2(0), m))).r);
         a = max(a, saturate(b * 4.0));
     }
+    // Any coverage takes the real pixel whole: a partial blend keeps part of the interpolated (dragged) HUD.
     if (h.debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
-    if (a > 0.0) gen.write(mix(gen.read(p), cur.read(p), a), p);
+    if (a > 0.0) gen.write(cur.read(p), p);
 }
 )";
 id<MTLComputePipelineState> g_hud, g_uiCopy, g_uiCopyArray;
@@ -732,6 +733,9 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                     MetalTrace::SaveTexture(cb, genTex, base + "-gen");
                     MetalTrace::SaveTexture(cb, g_prev, base + "-prev");
                     MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
+                    if (g_uiSnapFrame == g_frame) {
+                        MetalTrace::SaveTexture(cb, g_uiSnap, base + "-uisnap");
+                    }
                 }
                 Count(4);
                 g_generated.fetch_add(1);

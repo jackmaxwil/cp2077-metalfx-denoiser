@@ -238,6 +238,10 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   FrameGen::HudComposite snapshots the UI layer's alpha (level 0 and the 16x mip) inside the game's HUD composite
   encoder (m_hud_occupiedTiles, via Denoise's encoder hooks), and the restore reads the snapshot. Self-test: a
   composite stand-in with a 2D array, mipmapped UI layer; the debug paint covers 2048 of 2048 pixels.
+- Measured in game after the snapshot fix (cp-run framegen, fgeval saves of the generated frame, the real frame and
+  the snapshot): HUD pixels in generated frames equal the real frame on 100% (3 samples, about 215,000 px each), up
+  from 62-70%; soft edges and the halo went from 86% to 100% once any coverage takes the real pixel whole instead of
+  blending. scripts: compare fgnormal<i>-gen against -cur over -uisnap.
 - If ghosting remains with that setting on and frame generation on: Apple's intended wiring for a composited HUD
   (WWDC25 211) is colour/prev colour = the HUD-less scene, uiTexture = the shown image, isUITextureComposited = YES.
 
