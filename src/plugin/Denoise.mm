@@ -609,6 +609,7 @@ void Sharpen(id<MTLCommandBuffer> cb, id<MTLTexture> output)
         td.storageMode = MTLStorageModePrivate;
         g_sharpSrc = [output.device newTextureWithDescriptor:td];
     }
+    MetalTrace::Internal internal;
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                sourceSize:MTLSizeMake(output.width, output.height, 1) toTexture:g_sharpSrc destinationSlice:0

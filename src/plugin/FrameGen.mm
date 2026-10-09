@@ -16,8 +16,7 @@
 // Camera: near plane, vertical field of view and aspect ratio from NRD's constants (Denoise::Projection; the game renders
 // reversed-Z with an infinite far plane, given here as a large finite one).
 //
-// ponytail: the HUD is interpolated with the scene (the game draws it into the same image and gives no separate UI
-// texture); add a UI texture if HUD warping during camera motion is objectionable.
+// HUD: generated frames take the HUD's pixels from the real frame (RestoreHud, the game's UI layer as mask).
 
 #include "FrameGen.hpp"
 #include "Denoise.hpp"
@@ -27,6 +26,7 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <objc/runtime.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <map>
 
 namespace {
 
@@ -51,6 +52,141 @@ id g_evalInterp; // id<MTLFXFrameInterpolator>: its own history (a half-rate str
 // Jitter given to the interpolator: the render jitter of the frame. The color input is the upscaled (unjittered) image,
 // but depth and motion are the jittered render-resolution ones; measured with Evaluate during a turn, the render jitter
 // scores about 0.6 dB higher than 0 against the real in-between frame (50-54 dB either way). METALFX_FG_JITTER=0 passes 0.
+// Output-size RGBA8 sRGB render targets (UI layers), noted per render pass: texture -> (last present count, passes).
+std::mutex g_uiMutex;
+struct UiTarget {
+    id<MTLTexture> texture;
+    uint64_t frame = 0;
+    unsigned passes = 0;
+};
+std::map<void*, UiTarget> g_uiTargets;
+std::atomic<NSUInteger> g_outW{0}, g_outH{0};
+std::atomic<bool> g_saveUi{false};
+int g_uiLogged = 3; // Evaluate logs the UI layers seen at its first three frames
+// The HUD: the game draws it into an output-size RGBA8 sRGB layer (with alpha) and composites it over the scene before
+// its last pass, so the presented images hold it and the interpolator would warp it with the scene (ghosting in
+// motion). After interpolating, the HUD's pixels (the layer's alpha, dilated by a pixel and boosted) are taken from
+// this frame's real image instead. (MetalFX's own UI input does not fit: its composited mode returned black even with
+// an empty UI texture, and the other mode needs the scene without the HUD, which the game never has in display space.)
+// METALFX_FG_UI=0 turns it off.
+const bool g_useUi = [] {
+    const char* env = std::getenv("METALFX_FG_UI");
+    return !(env && *env == '0');
+}();
+
+NSString* const kHudSource = @R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
+                   texture2d<float, access::read> cur [[texture(1)]],
+                   texture2d<float, access::read> ui [[texture(2)]],
+                   constant uint& debug [[buffer(0)]],
+                   uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= gen.get_width() || p.y >= gen.get_height()) return;
+    const int2 s = int2(ui.get_width(), ui.get_height()) - 1;
+    float a = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+            a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).a);
+    a = saturate(a * 2.0);
+    if (debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
+    if (a > 0.0) gen.write(mix(gen.read(p), cur.read(p), a), p);
+}
+)";
+id<MTLComputePipelineState> g_hud;
+id<MTLTexture> g_hudOut; // the generated frame with the HUD restored
+id<MTLTexture> Make(id<MTLDevice> d, MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage usage);
+bool Fits(id<MTLTexture> t, id<MTLTexture> like);
+
+// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer has coverage.
+void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui)
+{
+    if (!g_hud) {
+        NSError* error = nil;
+        id<MTLLibrary> lib = [cb.device newLibraryWithSource:kHudSource options:nil error:&error];
+        g_hud = [cb.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_hud"] error:&error];
+        if (!g_hud) {
+            Logger::Error(std::string("FrameGen: HUD kernel failed: ") +
+                          (error ? error.localizedDescription.UTF8String : "no library"));
+            return;
+        }
+    }
+    MetalTrace::Internal internal;
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:g_hud];
+    [ce setTexture:gen atIndex:0];
+    [ce setTexture:cur atIndex:1];
+    [ce setTexture:ui atIndex:2];
+    static const uint32_t debug = [] {
+        const char* env = std::getenv("METALFX_FG_HUDDEBUG");
+        return env && *env == '1' ? 1u : 0u;
+    }();
+    [ce setBytes:&debug length:sizeof(debug) atIndex:0];
+    [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 2) {
+        char buf[240];
+        std::snprintf(buf, sizeof(buf), "FrameGen: HUD pass encoded (encoder %s, gen %lux%lu usage %lu, ui %lux%lu format %lu)",
+                      class_getName([ce class]), (unsigned long)gen.width, (unsigned long)gen.height,
+                      (unsigned long)gen.usage, (unsigned long)ui.width, (unsigned long)ui.height,
+                      (unsigned long)ui.pixelFormat);
+        Logger::Info(buf);
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+          Logger::Info(std::string("FrameGen: HUD pass command buffer status ") + std::to_string(done.status) +
+                       (done.error ? std::string(" error ") + done.error.localizedDescription.UTF8String : ""));
+        }];
+    }
+}
+
+// The generated frame (g_out) with this frame's HUD over it, as a new texture: a copy of g_out first, because a compute
+// pass on g_out itself right after the interpolator lost its writes in the game (MetalFX's output write landed after
+// it), while copies of g_out encoded after the interpolator always see its output. g_out when there is no UI layer.
+id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui)
+{
+    if (!ui || ui.width != gen.width || ui.height != gen.height) {
+        return gen;
+    }
+    if (!Fits(g_hudOut, gen)) {
+        g_hudOut = Make(gen.device, gen.pixelFormat, gen.width, gen.height,
+                        MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+    }
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:gen toTexture:g_hudOut];
+    [blit endEncoding];
+    RestoreHud(cb, g_hudOut, cur, ui);
+    return g_hudOut;
+}
+
+// The UI layer drawn for the frame being presented (most passes, if several); nil if none.
+id<MTLTexture> CurrentUi(uint64_t frame)
+{
+    std::lock_guard<std::mutex> lock(g_uiMutex);
+    id<MTLTexture> best = nil;
+    unsigned passes = 0;
+    if (g_uiLogged < 3) {
+        ++g_uiLogged;
+        for (auto& [ptr, u] : g_uiTargets) {
+            if (u.texture.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) {
+                continue;
+            }
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "FrameGen: UI layer %p format %lu last drawn in frame %llu (%u passes), now %llu",
+                          ptr, (unsigned long)u.texture.pixelFormat, (unsigned long long)u.frame, u.passes,
+                          (unsigned long long)frame);
+            Logger::Info(buf);
+        }
+    }
+    for (auto& [ptr, u] : g_uiTargets) {
+        if (u.texture.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB && frame - u.frame <= 1 && u.passes > passes) {
+            best = u.texture;
+            passes = u.passes;
+        }
+    }
+    return best;
+}
+
 const bool g_passJitter = [] {
     const char* env = std::getenv("METALFX_FG_JITTER");
     return !(env && *env == '0');
@@ -129,8 +265,33 @@ bool Fits(id<MTLTexture> t, id<MTLTexture> like)
 
 namespace FrameGen {
 
+void RenderPass(id desc)
+{
+    if (!Enabled() || !g_outW.load()) {
+        return;
+    }
+    MTLRenderPassDescriptor* rp = desc;
+    for (NSUInteger i = 0; i < 8; ++i) {
+        id<MTLTexture> t = rp.colorAttachments[i].texture;
+        if (t && (t.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || t.pixelFormat == MTLPixelFormatRGBA16Float) &&
+            t.width == g_outW.load() && t.height == g_outH.load() && !t.isFramebufferOnly &&
+            ![t.label hasPrefix:@"CAMetalLayer"]) {
+            std::lock_guard<std::mutex> lock(g_uiMutex);
+            UiTarget& u = g_uiTargets[(__bridge void*)t];
+            u.texture = t;
+            if (u.frame != g_frame) {
+                u.passes = 0;
+            }
+            u.frame = g_frame;
+            ++u.passes;
+        }
+    }
+}
+
 void Evaluate(int samples)
 {
+    g_saveUi.store(true);
+    g_uiLogged = 0;
     std::lock_guard<std::mutex> lock(g_mutex);
     g_evalLeft.store(std::max(0, samples));
     g_havePrev2 = false;
@@ -312,6 +473,23 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             g_overlay.drawableSize.height != layer.drawableSize.height) {
             g_overlay.drawableSize = layer.drawableSize;
         }
+        g_outW.store(tex.width);
+        g_outH.store(tex.height);
+        if (g_saveUi.exchange(false)) { // the UI layer candidates drawn in the last two frames, as PNGs
+            std::lock_guard<std::mutex> uiLock(g_uiMutex);
+            int i = 0;
+            for (auto& [ptr, u] : g_uiTargets) {
+                if (g_frame - u.frame <= 2) {
+                    id<MTLTexture> t = u.texture;
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "FrameGen: UI candidate fgui%d %p, %u passes in frame %llu", i, ptr,
+                                  u.passes, (unsigned long long)u.frame);
+                    Logger::Info(buf);
+                    MetalTrace::SaveTexture(commandBuffer, t, "fgui" + std::to_string(i++));
+                }
+            }
+            MetalTrace::SaveTexture(commandBuffer, tex, "fgui-screen");
+        }
         id<MTLDevice> dev = tex.device;
         const MTLTextureUsage colorUsage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
                                            MTLTextureUsageRenderTarget;
@@ -338,6 +516,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         // A generated frame before it, when this frame has depth and motion and there is a previous frame.
         id<CAMetalDrawable> generated = nil;
+        id<MTLTexture> genTex = g_out; // what the generated drawable shows (g_out, or a copy with the HUD restored)
         const bool fresh = g_inputsFrame == g_frame && g_depth;
         if (!fresh) {
             Count(1);
@@ -361,7 +540,8 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 g_evalInterp = [fd newFrameInterpolatorWithDevice:dev];
             }
             id<MTLFXFrameInterpolator> fi = g_evalInterp;
-            const bool jitter = g_evalIndex % 2 == 1;
+            const bool jitter = g_passJitter, useUi = g_useUi && g_evalIndex % 2 == 1;
+            id<MTLTexture> ui = useUi ? CurrentUi(g_frame) : nil;
             fi.colorTexture = g_cur;
             fi.prevColorTexture = g_prev2;
             fi.depthTexture = g_depth;
@@ -381,12 +561,16 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             fi.depthReversed = g_depthReversed;
             fi.shouldResetHistory = first;
             [fi encodeToCommandBuffer:cb];
+            id<MTLTexture> shown = WithHud(cb, g_out, g_cur, ui);
             if (++g_evalWarm <= 2) {
                 goto evalDone;
             }
             {
             const std::string base = "fgeval" + std::to_string(g_evalIndex);
-            MetalTrace::SaveTexture(cb, g_out, base + "-gen-j" + (jitter ? "1" : "0"));
+            MetalTrace::SaveTexture(cb, shown, base + "-gen-u" + (ui ? "1" : "0"));
+            if (ui) {
+                MetalTrace::SaveTexture(cb, ui, base + "-ui");
+            }
             MetalTrace::SaveTexture(cb, g_prev, base + "-real");
             MetalTrace::SaveTexture(cb, g_prev2, base + "-prev2");
             MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
@@ -444,9 +628,10 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
+                genTex = WithHud(cb, g_out, g_cur, g_useUi ? CurrentUi(g_frame) : nil);
                 if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
                     const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
-                    MetalTrace::SaveTexture(cb, g_out, base + "-gen");
+                    MetalTrace::SaveTexture(cb, genTex, base + "-gen");
                     MetalTrace::SaveTexture(cb, g_prev, base + "-prev");
                     MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
                 }
@@ -456,7 +641,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         blit = [cb blitCommandEncoder];
         if (generated) {
-            [blit copyFromTexture:g_out toTexture:generated.texture];
+            [blit copyFromTexture:genTex toTexture:generated.texture];
         }
         [blit copyFromTexture:g_cur toTexture:real.texture];
         [blit endEncoding];

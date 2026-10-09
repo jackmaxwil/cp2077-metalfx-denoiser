@@ -22,6 +22,13 @@ void OnFirstFrame(std::function<void()> fn);
 // METALFX_PERF_EVERY environment variable wins).
 void LogPerformance(uint64_t everyFrames);
 
+// While one is alive on a thread, the hooks pass that thread's Metal calls straight through (the plugin's own GPU work:
+// the denoiser's game-pass bookkeeping would otherwise see it as one of the game's encoders, and could drop it).
+struct Internal {
+    Internal();
+    ~Internal();
+};
+
 // Added to the LOD bias of every mipmapped sampler the game creates from now on (the game creates them at startup, with
 // bias 0): negative values pick sharper mip levels, to match the 3x upscale (log2(1/3) - log2(1/2) = -0.585).
 void SetSamplerLodBias(float add);

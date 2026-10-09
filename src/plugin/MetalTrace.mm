@@ -500,6 +500,7 @@ std::unordered_set<const void*> s_skipPipes;
 std::atomic<uint64_t> s_skipped{0};
 thread_local const void* t_enc = nullptr;
 thread_local bool t_drop = false;
+thread_local int t_internal = 0; // the plugin's own encoding (MetalTrace::Internal): hooks pass it straight through
 std::mutex s_perfMutex;
 
 double Now()
@@ -1555,6 +1556,16 @@ void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
 
 } // namespace (reopened below)
 
+MetalTrace::Internal::Internal()
+{
+    ++t_internal;
+}
+
+MetalTrace::Internal::~Internal()
+{
+    --t_internal;
+}
+
 void MetalTrace::SaveTexture(id commandBuffer, id texture, const std::string& name)
 {
     DumpTexture(commandBuffer, texture, name);
@@ -1678,6 +1689,7 @@ id H_cbRender(id self, SEL sel, id desc)
     if (Denoise::Active()) {
         Denoise::RenderPass(desc);
     }
+    FrameGen::RenderPass(desc);
     BeginEncoder(self, enc, 'r', -1, desc);
     t_profIdx = -1;
     return enc;
@@ -2137,6 +2149,10 @@ using Exec = void (*)(id, SEL, id, NSRange);
 
 void H_setCps(id self, SEL sel, id pso)
 {
+    if (t_internal) {
+        ORIG(o_setCps, void (*)(id, SEL, id), self)(self, sel, pso);
+        return;
+    }
     if (s_skip.load(std::memory_order_relaxed)) {
         std::shared_lock<std::shared_mutex> lock(s_skipMutex);
         t_enc = (__bridge const void*)self;
@@ -2383,7 +2399,7 @@ void H_dispTG(id self, SEL sel, MTLSize groups, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "tg", groups, threads);
     }
-    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispTG, Disp, self)(self, sel, groups, threads);
@@ -2394,7 +2410,7 @@ void H_dispTh(id self, SEL sel, MTLSize grid, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "th", grid, threads);
     }
-    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispTh, Disp, self)(self, sel, grid, threads);
@@ -2405,7 +2421,7 @@ void H_dispInd(id self, SEL sel, id buffer, NSUInteger offset, MTLSize threads)
     if (s_capture.load(std::memory_order_relaxed)) {
         EmitDispatch(self, "ind", MTLSizeMake(0, 0, 0), threads);
     }
-    if (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self))) {
+    if (!t_internal && (Dropped(self) || (Denoise::Active() && Denoise::Dispatch(self)))) {
         return;
     }
     ORIG(o_dispInd, DispInd, self)(self, sel, buffer, offset, threads);

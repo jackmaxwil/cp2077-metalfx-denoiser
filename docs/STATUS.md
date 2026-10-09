@@ -198,6 +198,18 @@ Path tracing with the denoiser, no frame generation, frozen spot:
 
 Player report at 3x with sharpening 0.4, texture LOD bias -0.585 and frame generation: looks great, very smooth.
 
+## Frame generation HUD (2026-10-08, unverified)
+
+Player report at 2.5x: the HUD ghosts in motion. Measured with `fgeval`: in the HUD regions the interpolated frame
+scores 28.6 dB against the real in-between frame, worse than repeating the frame (32.7 dB). The game draws the HUD into
+an output-size RGBA8 sRGB layer with alpha (5 passes a frame, found by `FrameGen::RenderPass`) and composites it into an
+RGBA16F target before its last pass; there is no scene-without-HUD image in display space. MetalFX's own UI input does
+not fit: `uiTextureComposited` returned black even with an empty UI texture (standalone test). Fix in place: after
+interpolating, the generated frame is copied and the HUD's pixels (layer alpha, dilated, boosted) are taken from the
+real frame (`WithHud`/`RestoreHud`; METALFX_FG_UI=0 turns it off). A compute pass on the interpolator's output itself
+lost its writes in the game (standalone it worked), hence the copy. Not yet verified: the last test run hung when the
+game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`).
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.
