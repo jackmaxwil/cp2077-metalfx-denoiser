@@ -23,6 +23,23 @@ enabled = true
 
 "Debug: noisy lighting" shows the lighting with no denoiser at all (comparisons only).
 
+### Path tracing at native resolution
+
+Starting point at 3456x2160 (M4 Max): path tracing, Resolution Scaling MetalFX, and in `config.toml`
+
+```toml
+[metalfx]
+enabled = true
+ultra_performance = true  # render below the output and let MetalFX upscale
+ultra_scale = 2.5         # 3.0 is fastest (about 28 ms per rendered frame), 2.5 sharper (about 38 ms)
+texture_lod_bias = -0.32  # matches the scale: log2(2 / ultra_scale); -0.585 for 3.0
+sharpness = 0.4           # lower it if thin far detail (wires) looks blocky
+frame_generation = true   # about twice the displayed frames, for about 5 ms per rendered frame
+```
+
+ModMenu > MetalFX Denoiser switches the denoiser, Ultra Performance, frame generation, the render scale and the
+sharpening while playing; the texture LOD bias applies from the next game start.
+
 ## Build and install
 
 Requirements: macOS 26 for the denoiser (the plugin loads on 14+ and leaves rendering alone), Apple silicon, CMake

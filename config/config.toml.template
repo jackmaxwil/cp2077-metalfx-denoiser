@@ -13,7 +13,8 @@ enabled = true
 ultra_performance = false
 
 # Sharper textures: added to the texture LOD bias of the game's samplers (negative = sharper mip levels). -0.585 matches
-# the 3x upscale (the game's bias suits 2x). Applies from the next game start; may add shimmer on fine detail.
+# the 3x upscale (the game's bias suits 2x); in general log2(2 / ultra_scale), so -0.32 for 2.5. Applies from the next
+# game start; may add shimmer on fine detail.
 texture_lod_bias = 0.0
 
 # Sharpening after the Apple denoiser, 0 (off) to 1 (strongest): contrast adaptive (AMD's RCAS), against the softness
@@ -21,7 +22,8 @@ texture_lod_bias = 0.0
 sharpness = 0.0
 
 # Render scale of ultra_performance: 3.0 (the engine's hidden "Ultra Performance") down to 2.0. 2.5 renders 1382x864 for
-# 3456x2160: fewer jagged edges and more texture detail than 3.0, for more GPU time per frame.
+# 3456x2160: fewer jagged edges and more texture detail than 3.0, for more GPU time per frame (path tracing at
+# 3456x2160: about 28 ms at 3.0, 32 ms at 2.75, 38 ms at 2.5). Also in ModMenu.
 ultra_scale = 3.0
 
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
