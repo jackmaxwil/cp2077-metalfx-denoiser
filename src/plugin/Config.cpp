@@ -123,6 +123,8 @@ bool Load(const std::string& path) {
                 s_settings.textureLodBias = ParseFloat(value);
             } else if (key == "sharpness") {
                 s_settings.sharpness = ParseFloat(value);
+            } else if (key == "remove_hud_effects") {
+                s_settings.removeHudEffects = ParseBool(value);
             }
         } else if (currentSection == "features") {
             if (key == "shadows") {

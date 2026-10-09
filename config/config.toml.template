@@ -26,6 +26,12 @@ sharpness = 0.0
 # 3456x2160: about 28 ms at 3.0, 32 ms at 2.75, 38 ms at 2.5). Also in ModMenu.
 ultra_scale = 3.0
 
+# Remove the game's HUD effects in its HUD composite: the chromatic aberration and blurred echo copies of every HUD
+# element (pushed outward from the screen centre) and the HUD's barrel distortion. They show as HUD ghosting, and frame
+# generation smears them. The constants the game uses are logged either way ("HUD composite constants"). Also in
+# ModMenu.
+remove_hud_effects = false
+
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false

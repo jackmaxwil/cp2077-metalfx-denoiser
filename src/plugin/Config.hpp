@@ -53,6 +53,7 @@ struct Settings {
     float ultraScale = 3.0f;      // render scale of ultra_performance (2.0-3.0; the game's is 3.0)
     float textureLodBias = 0.0f;  // added to the game's sampler LOD bias at startup (-0.585 matches 3x)
     float sharpness = 0.0f;       // RCAS after the denoised scaler, 0 (off) to 1
+    bool removeHudEffects = false; // Denoise::SetHudEffectsOff: the game's HUD echo copies and distortion
     Features features;
     Debug debug;
 };

@@ -415,6 +415,13 @@ void SetWatch(bool on)
     g_watch.store(on);
 }
 
+void SetHudEffectsOff(bool off)
+{
+    if (g_hudFxOff.exchange(off) != off) {
+        Logger::Info(std::string("Denoise: game HUD effects ") + (off ? "off (plugin)" : "as the game sets them"));
+    }
+}
+
 bool Active()
 {
     return g_mode.load(std::memory_order_relaxed) != Off || g_watch.load(std::memory_order_relaxed);
@@ -476,6 +483,50 @@ void Use(id encoder, const void* const* resources, size_t count, unsigned long u
     }
 }
 
+// The game's HUD composite (m_hud_occupiedTiles, label 3959251910) reads its settings from a constant buffer: the
+// first descriptor table of its top-level argument buffer, descriptor 6 (24-byte descriptors, buffer address first).
+// Floats at byte 16 (the switch of the chromatic aberration and blurred echo copies of the HUD, along the radial
+// vector from the screen centre), 48 and 52 (the HUD's barrel distortion), 108 (aberration strength), 112-140 (echo
+// offsets). Logged every 600 calls; with SetHudEffectsOff, the switch and the distortion are zeroed before the GPU
+// reads them, so the HUD is composited where the UI layer has it, without copies.
+std::atomic<bool> g_hudFxOff{false};
+
+void HudConstants(const Enc& e) // caller holds g_mutex
+{
+    static std::atomic<unsigned> calls{0};
+    static std::atomic<bool> failLogged{false};
+    const unsigned n = calls.fetch_add(1);
+    id<MTLBuffer> root = e.root;
+    float* f = nullptr;
+    if (root && root.storageMode != MTLStorageModePrivate && e.rootOffset + 8 <= root.length) {
+        const uint8_t* args = static_cast<const uint8_t*>(root.contents) + e.rootOffset;
+        if (const uint8_t* table = MetalTrace::MapGpuAddress(U64(args), 24 * 7)) {
+            f = const_cast<float*>(reinterpret_cast<const float*>(MetalTrace::MapGpuAddress(U64(table + 24 * 6), 160)));
+        }
+    }
+    if (!f) {
+        if (!failLogged.exchange(true)) {
+            Logger::Warn("Denoise: HUD composite constants not readable (root argument buffer or constant buffer not "
+                         "in a shared buffer)");
+        }
+        return;
+    }
+    if (n % 600 == 0) {
+        char buf[300];
+        std::snprintf(buf, sizeof(buf),
+                      "Denoise: HUD composite constants: effects switch %.3f, distortion %.4f %.4f, aberration %.4f, "
+                      "echo offsets %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f%s",
+                      f[4], f[12], f[13], f[27], f[28], f[29], f[30], f[31], f[32], f[33], f[34], f[35],
+                      g_hudFxOff.load() ? " (plugin zeroes switch and distortion)" : "");
+        Logger::Info(buf);
+    }
+    if (g_hudFxOff.load()) {
+        f[4] = 0.0f;
+        f[12] = 0.0f;
+        f[13] = 0.0f;
+    }
+}
+
 bool Dispatch(id encoder)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -485,6 +536,9 @@ bool Dispatch(id encoder)
     }
     Enc& e = it->second;
     bool drop = false;
+    if (e.label == "3959251910") {
+        HudConstants(e);
+    }
     const Chain* c = StartOf(e.label);
     if (c && (!e.open || e.atrous > 0 || e.chain != c)) {
         if (e.open) {
