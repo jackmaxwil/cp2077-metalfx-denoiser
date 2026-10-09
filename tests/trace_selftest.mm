@@ -264,11 +264,21 @@ int main(int, char** argv)
             fl.device = dev;
             fl.pixelFormat = MTLPixelFormatRGBA16Float;
             fl.drawableSize = CGSizeMake(64, 32);
+            // A HUD layer like the game's (output size, RGBA8 sRGB, drawn every frame): exercises the HUD restore.
+            fd.pixelFormat = MTLPixelFormatRGBA8Unorm_sRGB;
+            fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            id<MTLTexture> fui = [dev newTextureWithDescriptor:fd];
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
             for (int frame = 0; frame < 12; ++frame) {
                 @autoreleasepool {
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
+                    MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
+                    uiPass.colorAttachments[0].texture = fui;
+                    uiPass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    uiPass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1);
+                    uiPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    [[cb renderCommandEncoderWithDescriptor:uiPass] endEncoding];
                     ts.colorTexture = fc;
                     ts.depthTexture = fz;
                     ts.motionTexture = fm;
