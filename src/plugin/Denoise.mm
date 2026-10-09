@@ -30,7 +30,6 @@
 // The buffers are read through MetalTrace's registry of the game's large shared heap buffers.
 
 #include "Denoise.hpp"
-#include "FrameGen.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
 
@@ -105,7 +104,6 @@ struct Enc {
     bool open = false;
     int atrous = 0;
     bool kept = false; // the chain's keep pass has run
-    __unsafe_unretained id hudScene = nil; // the game's HUD composite read this scene in this encoder (FrameGen::Scene)
     std::vector<id<MTLTexture>> in, out;
     std::vector<Job> jobs;
 };
@@ -519,19 +517,6 @@ bool Dispatch(id encoder)
     } else {
         drop = e.open;
     }
-    // The game's HUD composite, m_hud_occupiedTiles (scene + UI layer + glow, tiles with HUD) and m_hud_emptyTiles
-    // (scene copied, tiles without): both read the scene without the HUD, the only RGBA16Float texture they only read
-    // (output size, 2D array, slice 0). Its uses are declared just before each dispatch, so pick it here, before the clear.
-    if (e.label == "3959251910" || e.label == "3985020153") {
-        for (auto& [r, usage] : e.uses) {
-            id<MTLTexture> t = r;
-            if (usage == MTLResourceUsageRead && t.pixelFormat == MTLPixelFormatRGBA16Float &&
-                (t.textureType == MTLTextureType2D || t.textureType == MTLTextureType2DArray)) {
-                e.hudScene = t; // FrameGen::Scene checks it is output size
-                break;
-            }
-        }
-    }
     e.uses.clear();
     return drop;
 }
@@ -539,7 +524,6 @@ bool Dispatch(id encoder)
 void EndEncoding(id encoder)
 {
     std::vector<Job> jobs;
-    id<MTLTexture> scene = nil;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_enc.find((__bridge const void*)encoder);
@@ -549,12 +533,8 @@ void EndEncoding(id encoder)
         if (it->second.open) {
             Close(it->second);
         }
-        scene = it->second.hudScene;
         jobs = std::move(it->second.jobs);
         g_enc.erase(it);
-    }
-    if (scene) {
-        FrameGen::Scene(encoder, scene);
     }
     if (jobs.empty()) {
         return;

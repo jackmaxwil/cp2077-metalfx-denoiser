@@ -268,57 +268,11 @@ int main(int, char** argv)
             fd.pixelFormat = MTLPixelFormatRGBA8Unorm_sRGB;
             fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             id<MTLTexture> fui = [dev newTextureWithDescriptor:fd];
-            // Twice: plain, then with a compute pass labelled like the game's HUD composite (m_hud_occupiedTiles) that
-            // reads a 2D array RGBA16Float scene declared with useResource: frames must then be interpolated from
-            // that scene (FrameGen::Scene, picked by Denoise at the dispatch).
-            static const char* compSource = R"(
-#include <metal_stdlib>
-using namespace metal;
-kernel void hud_comp(texture2d_array<float, access::read> scene [[texture(0)]],
-                     texture2d<float, access::write> out [[texture(1)]], uint2 p [[thread_position_in_grid]])
-{
-    if (p.x < out.get_width() && p.y < out.get_height()) out.write(scene.read(p, 0), p);
-}
-)";
-            NSError* compErr = nil;
-            id<MTLLibrary> compLib = [dev newLibraryWithSource:@(compSource) options:nil error:&compErr];
-            MTLComputePipelineDescriptor* cpd = [[MTLComputePipelineDescriptor new] autorelease];
-            cpd.computeFunction = [compLib newFunctionWithName:@"hud_comp"];
-            cpd.label = @"3959251910";
-            id<MTLComputePipelineState> comp = [dev newComputePipelineStateWithDescriptor:cpd
-                                                                                  options:MTLPipelineOptionNone
-                                                                               reflection:nil
-                                                                                    error:&compErr];
-            fd.pixelFormat = MTLPixelFormatRGBA16Float;
-            fd.textureType = MTLTextureType2DArray;
-            fd.arrayLength = 1;
-            fd.usage = MTLTextureUsageShaderRead;
-            id<MTLTexture> scene = [dev newTextureWithDescriptor:fd];
-            fd.textureType = MTLTextureType2D;
-            fd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-            id<MTLTexture> composited = [dev newTextureWithDescriptor:fd];
-            if (!comp || !scene || !composited) {
-                return Fail("HUD composite stand-in");
-            }
-            for (int pass = 0; pass < 2; ++pass) {
-            if (pass == 1) {
-                Denoise::SetMode("pass"); // the encoder hooks feed Denoise, which finds the composite
-            }
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
-            const auto scenesBefore = FrameGen::FromScenes();
             for (int frame = 0; frame < 12; ++frame) {
                 @autoreleasepool {
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
-                    if (pass == 1) {
-                        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-                        [ce setComputePipelineState:comp];
-                        [ce useResource:scene usage:MTLResourceUsageRead];
-                        [ce setTexture:scene atIndex:0];
-                        [ce setTexture:composited atIndex:1];
-                        [ce dispatchThreads:MTLSizeMake(64, 32, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
-                        [ce endEncoding];
-                    }
                     MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
                     uiPass.colorAttachments[0].texture = fui;
                     uiPass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -342,15 +296,6 @@ kernel void hud_comp(texture2d_array<float, access::read> scene [[texture(0)]],
             if (FrameGen::Generated() - before < 8) {
                 std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
                 return Fail("frame generation produced no frames");
-            }
-            if (pass == 1) {
-                Denoise::SetMode("off");
-                std::fprintf(stderr, "frame generation: %llu of %llu frames from scenes without the HUD\n",
-                             FrameGen::FromScenes() - scenesBefore, FrameGen::Generated() - before);
-                if (FrameGen::FromScenes() - scenesBefore < 6) {
-                    return Fail("frame generation did not use the scene without the HUD");
-                }
-            }
             }
         }
 

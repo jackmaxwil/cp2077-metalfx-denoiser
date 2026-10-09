@@ -7,9 +7,8 @@ namespace FrameGen {
 
 void SetEnabled(bool on);
 bool Enabled();
-// Generated frames presented since start, and those interpolated from scenes without the HUD.
+// Generated frames presented since start.
 unsigned long long Generated();
-unsigned long long FromScenes();
 // Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate
 // between frames N-2 and N (frame N's motion doubled) and save the result next to the real frame N-1 as PNGs
 // (fgeval<i>-gen-u<0|1>, -real, -prev2, -cur; u1: with the HUD layer as UI texture, u0: without, alternating), after three
@@ -23,10 +22,6 @@ namespace FrameGen {
 
 // After the game's MetalFX temporal scaler encode (either scaler): copies this frame's depth and motion.
 void AfterScaler(id scaler, id commandBuffer);
-
-// The game's HUD composite (Denoise.mm finds it: compute pipeline 3959251910) reads scene, the frame without the HUD;
-// encoder is still open. Copies it, so frame interpolation can run on scenes without the HUD.
-void Scene(id encoder, id scene);
 
 // Every render pass the game begins (desc: MTLRenderPassDescriptor): notes the output-size RGBA8 sRGB color targets
 // (the UI layers), the candidates for the interpolator's UI texture.

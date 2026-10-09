@@ -25,7 +25,6 @@
 
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
-#include <simd/simd.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 
@@ -45,7 +44,6 @@ std::mutex g_mutex;
 
 id g_interp; // id<MTLFXFrameInterpolator>
 id<MTLTexture> g_prev, g_cur, g_out, g_depth, g_motion;
-float g_mvScale[2] = {1, 1}; // the game's motion vector scale (to render pixels)
 id<MTLTexture> g_prev2; // frame N-2, only while an evaluation runs
 bool g_havePrev = false, g_havePrev2 = false;
 std::atomic<int> g_evalLeft{0};
@@ -79,12 +77,10 @@ const bool g_useUi = [] {
 NSString* const kHudSource = @R"(
 #include <metal_stdlib>
 using namespace metal;
-struct HudParams { uint debug; float2 mvToOut; float2 outToIn; };
 kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
                    texture2d<float, access::read> cur [[texture(1)]],
                    texture2d<float, access::read> ui [[texture(2)]],
-                   texture2d<float, access::read> motion [[texture(3)]],
-                   constant HudParams& h [[buffer(0)]],
+                   constant uint& debug [[buffer(0)]],
                    uint2 p [[thread_position_in_grid]])
 {
     if (p.x >= gen.get_width() || p.y >= gen.get_height()) return;
@@ -94,23 +90,8 @@ kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
         for (int x = -1; x <= 1; ++x)
             a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).a);
     a = saturate(a * 2.0);
-    if (a > 0.0) {
-        gen.write(h.debug != 0u ? float4(1, 0, 1, 1) : mix(gen.read(p), cur.read(p), a), p);
-        return;
-    }
-    // Outside the HUD: the interpolator moves pixels along the scene's motion, and so drags HUD pixels sideways next to
-    // the HUD. Where this pixel's motion path (either way, up to a whole frame's motion) crosses the HUD, take the real
-    // frame's pixel instead.
-    const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
-    const float2 m = motion.read(uint2(clamp(int2(float2(p) * h.outToIn), int2(0), ms))).xy * h.mvToOut;
-    if (dot(m, m) < 0.25) return;
-    for (int i = -8; i <= 8; ++i) {
-        const int2 q = clamp(int2(float2(p) + m * (float(i) / 8.0)), int2(0), s);
-        if (ui.read(uint2(q)).a > 0.0) {
-            gen.write(h.debug != 0u ? float4(0, 1, 1, 1) : cur.read(p), p);
-            return;
-        }
-    }
+    if (debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
+    if (a > 0.0) gen.write(mix(gen.read(p), cur.read(p), a), p);
 }
 )";
 id<MTLComputePipelineState> g_hud;
@@ -118,10 +99,8 @@ id<MTLTexture> g_hudOut; // the generated frame with the HUD restored
 id<MTLTexture> Make(id<MTLDevice> d, MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage usage);
 bool Fits(id<MTLTexture> t, id<MTLTexture> like);
 
-// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer has coverage, and the
-// real image's pixels next to the HUD where the scene's motion (this frame's motion vectors, times mvFactor) could have
-// dragged HUD pixels.
-void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui, float mvFactor)
+// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer has coverage.
+void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui)
 {
     if (!g_hud) {
         NSError* error = nil;
@@ -139,30 +118,11 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setTexture:gen atIndex:0];
     [ce setTexture:cur atIndex:1];
     [ce setTexture:ui atIndex:2];
-    [ce setTexture:g_motion atIndex:3];
-    struct {
-        uint32_t debug;
-        uint32_t pad;
-        simd_float2 mvToOut, outToIn;
-    } params;
     static const uint32_t debug = [] {
         const char* env = std::getenv("METALFX_FG_HUDDEBUG");
         return env && *env == '1' ? 1u : 0u;
     }();
-    params.debug = debug;
-    params.pad = 0;
-    // Motion vectors times the game's scale are in render pixels; output pixels are larger by the upscale.
-    const float sx = static_cast<float>(gen.width) / g_motion.width, sy = static_cast<float>(gen.height) / g_motion.height;
-    params.mvToOut = simd_make_float2(g_mvScale[0] * sx * mvFactor, g_mvScale[1] * sy * mvFactor);
-    params.outToIn = simd_make_float2(1.0f / sx, 1.0f / sy);
-    static std::atomic<bool> scaleLogged{false};
-    if (!scaleLogged.exchange(true)) {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "FrameGen: HUD guard motion scale %.1f, %.1f (render to output %.2f)", g_mvScale[0],
-                      g_mvScale[1], sx);
-        Logger::Info(buf);
-    }
-    [ce setBytes:&params length:sizeof(params) atIndex:0];
+    [ce setBytes:&debug length:sizeof(debug) atIndex:0];
     [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
     static std::atomic<int> logged{0};
@@ -183,10 +143,9 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
 // The generated frame (g_out) with this frame's HUD over it, as a new texture: a copy of g_out first, because a compute
 // pass on g_out itself right after the interpolator lost its writes in the game (MetalFX's output write landed after
 // it), while copies of g_out encoded after the interpolator always see its output. g_out when there is no UI layer.
-id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui,
-                       float mvFactor = 1.0f)
+id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui)
 {
-    if (!ui || ui.width != gen.width || ui.height != gen.height || !g_motion) {
+    if (!ui || ui.width != gen.width || ui.height != gen.height) {
         return gen;
     }
     if (!Fits(g_hudOut, gen)) {
@@ -196,170 +155,8 @@ id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTextur
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:gen toTexture:g_hudOut];
     [blit endEncoding];
-    RestoreHud(cb, g_hudOut, cur, ui, mvFactor);
+    RestoreHud(cb, g_hudOut, cur, ui);
     return g_hudOut;
-}
-
-// HUD-free interpolation: the game composites its HUD (the UI layer plus a glow pyramid made from it) onto the frame in
-// one compute pass; Scene copies that pass's input, the frame without the HUD. Generated frames are interpolated from
-// these scenes and composed as the real frame plus the scene's change where the HUD does not cover it, so the HUD and
-// its glow come from the real frame and are never interpolated (interpolating the shown frames dragged them along the
-// scene's motion: ghosts beside the HUD).
-NSString* const kSceneSource = @R"(
-#include <metal_stdlib>
-using namespace metal;
-kernel void fg_copy(texture2d<float, access::read> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
-                    uint2 p [[thread_position_in_grid]])
-{
-    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(src.read(p), p);
-}
-kernel void fg_copy_array(texture2d_array<float, access::read> src [[texture(0)]],
-                          texture2d<float, access::write> dst [[texture(1)]], uint2 p [[thread_position_in_grid]])
-{
-    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(src.read(p, 0), p);
-}
-kernel void fg_compose(texture2d<float, access::read> gen [[texture(0)]],
-                       texture2d<float, access::read> scene [[texture(1)]],
-                       texture2d<float, access::read> cur [[texture(2)]],
-                       texture2d<float, access::read> ui [[texture(3)]],
-                       texture2d<float, access::write> out [[texture(4)]],
-                       constant float4& h [[buffer(0)]], // x: has UI; y, z: display transform k, g
-                       uint2 p [[thread_position_in_grid]])
-{
-    if (p.x >= out.get_width() || p.y >= out.get_height()) return;
-    const float a = h.x != 0.0 ? ui.read(p).a : 0.0;
-    const float4 c = cur.read(p);
-    // The game's last pass (NoBuffers_Fullscreen) maps the composited image to the shown one; measured live as
-    // shown = k * scene^g (FitDisplay), applied to both scenes so their difference lands in the shown image's space.
-    const float3 g = h.z * float3(1.0);
-    const float3 d = h.y * (pow(max(gen.read(p).rgb, 0.0), g) - pow(max(scene.read(p).rgb, 0.0), g));
-    out.write(float4(c.rgb + d * (1.0 - a), c.a), p);
-}
-// Pairs (scene, shown) on a 64x64 grid where the UI layer is empty, for FitDisplay; -1 where it is not.
-kernel void fg_fit(texture2d<float, access::read> scene [[texture(0)]],
-                   texture2d<float, access::read> cur [[texture(1)]],
-                   texture2d<float, access::read> ui [[texture(2)]],
-                   device float* pairs [[buffer(0)]],
-                   constant uint& hasUi [[buffer(1)]],
-                   uint2 i [[thread_position_in_grid]])
-{
-    if (i.x >= 64 || i.y >= 64) return;
-    const uint2 p = uint2((float2(i) + 0.5) / 64.0 * float2(cur.get_width(), cur.get_height()));
-    const uint o = (i.y * 64 + i.x) * 6;
-    const bool hud = hasUi != 0u && ui.read(p).a > 0.0;
-    const float3 a = scene.read(p).rgb, b = cur.read(p).rgb;
-    for (uint c = 0; c < 3; ++c) {
-        pairs[o + c] = hud ? -1.0 : a[c];
-        pairs[o + 3 + c] = hud ? -1.0 : b[c];
-    }
-}
-)";
-id<MTLComputePipelineState> g_copyPso, g_copyArrayPso, g_composePso, g_fitPso;
-std::atomic<float> g_displayK{1.0f}, g_displayG{1.0f}; // shown = k * scene^g (FitDisplay)
-id<MTLBuffer> g_fitBuf;
-id<MTLTexture> g_sceneCur, g_scenePrev, g_genCopy;
-uint64_t g_sceneFrame = 0, g_scenePrevFrame = 0; // the frames (present count) the scenes belong to
-bool g_sceneInputs = false; // the interpolator's history is of scenes (true) or of shown frames
-
-bool ScenePipelines(id<MTLDevice> dev)
-{
-    if (g_copyPso && g_copyArrayPso && g_composePso && g_fitPso) {
-        return true;
-    }
-    NSError* error = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:kSceneSource options:nil error:&error];
-    g_copyPso = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_copy"] error:&error];
-    g_copyArrayPso = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_copy_array"] error:&error];
-    g_composePso = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_compose"] error:&error];
-    g_fitPso = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_fit"] error:&error];
-    g_fitBuf = [dev newBufferWithLength:64 * 64 * 6 * sizeof(float) options:MTLResourceStorageModeShared];
-    if (!g_copyPso || !g_copyArrayPso || !g_composePso || !g_fitPso || !g_fitBuf) {
-        Logger::Error(std::string("FrameGen: scene kernels failed: ") +
-                      (error ? error.localizedDescription.UTF8String : "no library"));
-        return false;
-    }
-    return true;
-}
-
-// The generated frame from the interpolated scene (gen): this frame as shown (cur) plus the scene's change outside the
-// HUD. A copy of gen first, as in WithHud (MetalFX's output write can land after a compute pass that reads it).
-id<MTLTexture> Compose(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> scene, id<MTLTexture> cur,
-                       id<MTLTexture> ui)
-{
-    if (!Fits(g_hudOut, gen)) {
-        g_hudOut = Make(gen.device, gen.pixelFormat, gen.width, gen.height,
-                        MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
-    }
-    if (!Fits(g_genCopy, gen)) {
-        g_genCopy = Make(gen.device, gen.pixelFormat, gen.width, gen.height, MTLTextureUsageShaderRead);
-    }
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:gen toTexture:g_genCopy];
-    [blit endEncoding];
-    const bool hasUi = ui && ui.width == gen.width && ui.height == gen.height;
-    const simd_float4 params = simd_make_float4(hasUi ? 1.0f : 0.0f, g_displayK.load(), g_displayG.load(), 0.0f);
-    MetalTrace::Internal internal;
-    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:g_composePso];
-    [ce setTexture:g_genCopy atIndex:0];
-    [ce setTexture:scene atIndex:1];
-    [ce setTexture:cur atIndex:2];
-    [ce setTexture:hasUi ? ui : cur atIndex:3];
-    [ce setTexture:g_hudOut atIndex:4];
-    [ce setBytes:&params length:sizeof(params) atIndex:0];
-    [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    [ce endEncoding];
-    return g_hudOut;
-}
-
-// Measures the game's last pass (composited image to shown image) on HUD-free pixels: a least-squares line through
-// (log scene, log shown), per channel pooled. Logged when it changes; identity is k = 1, g = 1.
-void FitDisplay(id<MTLCommandBuffer> cb, id<MTLTexture> scene, id<MTLTexture> cur, id<MTLTexture> ui)
-{
-    const bool hasUi = ui && ui.width == cur.width && ui.height == cur.height;
-    const uint32_t flag = hasUi ? 1 : 0;
-    MetalTrace::Internal internal;
-    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:g_fitPso];
-    [ce setTexture:scene atIndex:0];
-    [ce setTexture:cur atIndex:1];
-    [ce setTexture:hasUi ? ui : cur atIndex:2];
-    [ce setBuffer:g_fitBuf offset:0 atIndex:0];
-    [ce setBytes:&flag length:sizeof(flag) atIndex:1];
-    [ce dispatchThreads:MTLSizeMake(64, 64, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
-    [ce endEncoding];
-    id<MTLBuffer> buf = g_fitBuf;
-    [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
-      const float* v = static_cast<const float*>(buf.contents);
-      double n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
-      for (int i = 0; i < 64 * 64; ++i) {
-          for (int c = 0; c < 3; ++c) {
-              const float a = v[i * 6 + c], b = v[i * 6 + 3 + c];
-              if (a > 0.02f && b > 0.02f && a < 64.0f && b < 64.0f) {
-                  const double x = std::log(a), y = std::log(b);
-                  n += 1;
-                  sx += x;
-                  sy += y;
-                  sxx += x * x;
-                  sxy += x * y;
-              }
-          }
-      }
-      if (n < 500 || sxx * n - sx * sx < 1e-6) {
-          return; // too few or too uniform pixels
-      }
-      const double g = (n * sxy - sx * sy) / (n * sxx - sx * sx), k = std::exp((sy - g * sx) / n);
-      if (g < 0.25 || g > 4.0 || k < 0.05 || k > 20.0) {
-          return;
-      }
-      const float oldK = g_displayK.exchange(static_cast<float>(k)), oldG = g_displayG.exchange(static_cast<float>(g));
-      if (std::abs(oldK - k) > 0.05 * k || std::abs(oldG - g) > 0.05) {
-          char line[160];
-          std::snprintf(line, sizeof(line), "FrameGen: display transform measured: shown = %.3f * scene^%.3f (%d samples)",
-                        k, g, static_cast<int>(n));
-          Logger::Info(line);
-      }
-    }];
 }
 
 // The UI layer drawn for the frame being presented (most passes, if several); nil if none.
@@ -395,13 +192,12 @@ const bool g_passJitter = [] {
     return !(env && *env == '0');
 }();
 uint64_t g_inputsFrame = 0, g_frame = 0; // the frame (present count) whose depth and motion are in g_depth/g_motion
-float g_jitter[2] = {0, 0};
+float g_jitter[2] = {0, 0}, g_mvScale[2] = {1, 1};
 bool g_reset = true, g_depthReversed = true;
 double g_lastPresent = 0;
 // Why presents went the usual way (logged every 240 presents while on): 0 framebuffer only, 1 no depth/motion for this
 // frame, 2 first frame (no previous), 3 no extra drawable, 4 generated.
 uint64_t g_why[5] = {};
-uint64_t g_composed[2] = {}; // generated frames from shown frames (HUD restore) and from HUD-free scenes
 
 void Count(int why)
 {
@@ -411,15 +207,13 @@ void Count(int why)
         total += x;
     }
     if (total % 240 == 0) {
-        char buf[300];
-        std::snprintf(buf, sizeof(buf), "FrameGen: last 240 presents: %llu generated (%llu from scenes without the HUD), "
-                      "%llu stale inputs, %llu no previous, %llu no drawable, %llu framebuffer only",
-                      (unsigned long long)g_why[4], (unsigned long long)g_composed[1],
+        char buf[200];
+        std::snprintf(buf, sizeof(buf), "FrameGen: last 240 presents: %llu generated, %llu stale inputs, %llu no previous, "
+                      "%llu no drawable, %llu framebuffer only", (unsigned long long)g_why[4],
                       (unsigned long long)g_why[1], (unsigned long long)g_why[2], (unsigned long long)g_why[3],
                       (unsigned long long)g_why[0]);
         Logger::Info(buf);
         std::fill(std::begin(g_why), std::end(g_why), 0);
-        g_composed[0] = g_composed[1] = 0;
     }
 }
 std::atomic<int> g_logged{0};
@@ -470,39 +264,6 @@ bool Fits(id<MTLTexture> t, id<MTLTexture> like)
 } // namespace
 
 namespace FrameGen {
-
-void Scene(id encoder, id scene)
-{
-    if (!Enabled()) {
-        return;
-    }
-    id<MTLTexture> t = scene;
-    if (t.width != g_outW.load() || t.height != g_outH.load()) {
-        return; // not the output-size scene (or no frame presented yet)
-    }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (!ScenePipelines(t.device)) {
-        return;
-    }
-    if (!g_sceneCur || g_sceneCur.width != t.width || g_sceneCur.height != t.height ||
-        g_sceneCur.pixelFormat != t.pixelFormat) {
-        g_sceneCur = Make(t.device, t.pixelFormat, t.width, t.height,
-                          MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
-        g_scenePrevFrame = 0;
-    }
-    MetalTrace::Internal internal;
-    id<MTLComputeCommandEncoder> ce = encoder; // the game's, still open: our copy runs last in it
-    [ce setComputePipelineState:t.textureType == MTLTextureType2DArray ? g_copyArrayPso : g_copyPso];
-    [ce setTexture:t atIndex:0];
-    [ce setTexture:g_sceneCur atIndex:1];
-    [ce dispatchThreads:MTLSizeMake(t.width, t.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    g_sceneFrame = g_frame + 1; // for the frame being presented next
-    static std::atomic<bool> logged{false};
-    if (!logged.exchange(true)) {
-        Logger::Info("FrameGen: scene without the HUD found at the game's HUD composite (" + std::to_string(t.width) +
-                     "x" + std::to_string(t.height) + ")");
-    }
-}
 
 void RenderPass(id desc)
 {
@@ -561,13 +322,6 @@ std::atomic<unsigned long long> g_generated{0};
 unsigned long long Generated()
 {
     return g_generated.load();
-}
-
-std::atomic<unsigned long long> g_fromScenes{0};
-
-unsigned long long FromScenes()
-{
-    return g_fromScenes.load();
 }
 
 void AfterScaler(id scaler, id commandBuffer)
@@ -807,7 +561,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             fi.depthReversed = g_depthReversed;
             fi.shouldResetHistory = first;
             [fi encodeToCommandBuffer:cb];
-            id<MTLTexture> shown = WithHud(cb, g_out, g_cur, ui, 2.0f); // doubled motion: N-2 to N
+            id<MTLTexture> shown = WithHud(cb, g_out, g_cur, ui);
             if (++g_evalWarm <= 2) {
                 goto evalDone;
             }
@@ -853,15 +607,8 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             if (!generated) {
                 Count(3);
             } else {
-                // HUD-free scenes when this frame and the previous one have them; the history must not mix the two.
-                const bool scenes = g_sceneFrame == g_frame && g_scenePrevFrame + 1 == g_frame && g_scenePrev &&
-                                    Fits(g_sceneCur, tex);
-                if (scenes != g_sceneInputs) {
-                    g_reset = true;
-                    g_sceneInputs = scenes;
-                }
-                fi.colorTexture = scenes ? g_sceneCur : g_cur;
-                fi.prevColorTexture = scenes ? g_scenePrev : g_prev;
+                fi.colorTexture = g_cur;
+                fi.prevColorTexture = g_prev;
                 fi.depthTexture = g_depth;
                 fi.motionTexture = g_motion;
                 fi.outputTexture = g_out;
@@ -881,23 +628,12 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
-                id<MTLTexture> ui = g_useUi ? CurrentUi(g_frame) : nil;
-                if (scenes && g_frame % 60 == 0) {
-                    FitDisplay(cb, g_sceneCur, g_cur, ui);
-                }
-                genTex = scenes ? Compose(cb, g_out, g_sceneCur, g_cur, ui) : WithHud(cb, g_out, g_cur, ui);
-                ++g_composed[scenes ? 1 : 0];
-                if (scenes) {
-                    g_fromScenes.fetch_add(1);
-                }
+                genTex = WithHud(cb, g_out, g_cur, g_useUi ? CurrentUi(g_frame) : nil);
                 if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
                     const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
                     MetalTrace::SaveTexture(cb, genTex, base + "-gen");
                     MetalTrace::SaveTexture(cb, g_prev, base + "-prev");
                     MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
-                    if (scenes) {
-                        MetalTrace::SaveTexture(cb, g_sceneCur, base + "-scene");
-                    }
                 }
                 Count(4);
                 g_generated.fetch_add(1);
@@ -920,10 +656,6 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         std::swap(g_prev, g_cur);
         g_havePrev = fresh;
-        if (g_sceneFrame == g_frame && g_sceneCur) { // this frame's scene becomes the previous one
-            std::swap(g_scenePrev, g_sceneCur);
-            g_scenePrevFrame = g_frame;
-        }
         if (!fresh) {
             g_reset = true;
         }
