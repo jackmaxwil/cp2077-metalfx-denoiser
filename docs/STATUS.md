@@ -216,9 +216,10 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
   Findings kept: gViewToWorld column 2 is forward, column 1 up; the game turns the camera by 0.873 mrad per AppKit mouse
   count; it reads input on its main thread about 10 ms before its present call, so a game-thread input delay has no
   slack to remove; most input lag is after the present call (about 76 ms to the display in play).
-- Open: HUD ghosts beside HUD elements in generated frames during fast turns (the interpolator drags HUD pixels along the
-  scene's motion, outside the UI layer's mask). Idea not built: where a pixel's motion path crosses the HUD mask, take
-  it from the real frame.
+- HUD ghosts beside HUD elements in generated frames during fast turns (the interpolator drags HUD pixels along the
+  scene's motion, outside the UI layer's mask): fg_hud now also takes the real frame's pixel wherever a pixel's motion
+  path (this frame's motion vectors, game scale 1382x864 render pixels, times 2.5 to output; both directions, up to a
+  whole frame's motion) crosses the HUD. METALFX_FG_HUDDEBUG=1 paints those pixels cyan. Not yet judged in play.
 
 ## Input lag with frame generation (2026-10-09)
 
