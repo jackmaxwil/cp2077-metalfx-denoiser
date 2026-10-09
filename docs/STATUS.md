@@ -20,6 +20,10 @@ Path tracing at native 3456x2160 (fullscreen, M4 Max) at about 16.7 ms per rende
 smoothness on top. Starting point: about 50 ms (20 fps) with the Apple denoiser at MetalFX Performance. The plan is the
 "Path to 60" list at the end of this file.
 
+Where it stands (2026-10-08): path tracing at a 3x scale (1152x720 -> 3456x2160) with the Apple denoiser renders at
+27-32 ms; with frame generation 33-37 ms rendered and 48-60 fps displayed, which the player rates good and fairly
+smooth. Rendered 16.7 ms remains open (see "Path to 60").
+
 ## Where this stands against the goal
 
 Goal: more FPS and better image quality by replacing the game's denoisers (NRD REBLUR/RELAX/SIGMA) and its temporal
@@ -142,6 +146,12 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
   test after the fix: 240 of 240 presents generated, 33.5 ms per rendered frame.
 - **Player report (3x path tracing, Apple denoiser, no frame generation):** very stable, good performance, very good
   graphics; the 3x scale is only slightly noticeable. 27-32 ms per frame in play.
+- **Player report (3x path tracing, Apple denoiser, frame generation, fullscreen, after the overlay fix):** good, fairly
+  smooth. Play log (two minutes in the world): 240 of 240 presents generated in every window, no drawable waits, the
+  safety valve never fired; 33-37 ms per rendered frame (GPU-bound, p95 about 42 ms), against 27-32 ms without frame
+  generation; displayed interval median 16.7 ms (60 fps) in most windows and 20.8 ms (48 fps) in heavier scenes, p95
+  29-34 ms. The display runs at 120 Hz, so intervals land on multiples of 8.3 ms. At the start screen and in menus the
+  game does not call MetalFX, so frames pass through ("stale inputs").
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
