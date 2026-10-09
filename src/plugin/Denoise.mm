@@ -110,7 +110,6 @@ struct Enc {
 
 std::mutex g_mutex;
 std::unordered_map<const void*, Enc> g_enc;
-std::atomic<bool> g_hudFxOff{false}; // SetHudEffectsOff (HudConstants)
 id<MTLTexture> g_gbuf[3];
 std::atomic<int> g_logged{0};
 bool g_failed = false; // fx: setup failed, the game's scaler runs
@@ -490,6 +489,7 @@ void Use(id encoder, const void* const* resources, size_t count, unsigned long u
 // vector from the screen centre), 48 and 52 (the HUD's barrel distortion), 108 (aberration strength), 112-140 (echo
 // offsets). Logged every 600 calls; with SetHudEffectsOff, the switch and the distortion are zeroed before the GPU
 // reads them, so the HUD is composited where the UI layer has it, without copies.
+std::atomic<bool> g_hudFxOff{false};
 
 void HudConstants(const Enc& e) // caller holds g_mutex
 {
