@@ -110,6 +110,17 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
   setting: `[metalfx] ultra_performance`, ModMenu "Ultra Performance".
 - Remaining at 3x: path tracing 7.1, NRD 4.3, raster 3.1, RTXDI 3.1, other compute 2.7, ReSTIR GI 2.0, copies 1.9,
   MetalFX 1.3, the rest about 4 ms. 16.7 ms needs another 11 ms.
+- At 3x the Apple denoiser (its MetalFX passes plus about 2.6 ms of neural network convolutions, 5.4 ms) still costs
+  what RELAX plus the MetalFX upscaler cost (5.6 ms).
+- Path tracing settings (16 profiled experiments at 3x, `experiments/pt-knobs-*.txt`, `scripts/profile_diff.py`): one
+  frame per setting is too noisy (frames differ by about 1.5 ms; acceleration structure encoders show 1-11 ms spikes
+  in profiled frames, likely a timestamp artifact of the descriptor path, not seen in timing windows). Consistent only
+  in the path tracing pass itself: SHaRC bounces 2 (default 4) about -1.1 ms, SHaRC downscale 8 (default 5) about
+  -0.7 ms. Settings are worth 1-2 ms, not 11.
+- Copies at 3x are mostly clears: 68 buffer fills, 472 MiB per frame, about 1.5 ms (render resolution buffers at
+  4-120 bytes per pixel and a 64 MiB table). Skipping a clear is only safe if the buffer is fully rewritten first.
+- Outlook: about 24-26 ms (40 fps) rendered at 3x with the settings above looks reachable; 16.7 ms rendered does not
+  without a structural change. MetalFX frame interpolation is the remaining big lever for smoothness (not latency).
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 

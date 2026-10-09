@@ -1,0 +1,13 @@
+# Path tracing cost knobs at 3x with the denoiser (cvarbatch, " profile": GPU time per encoder for each experiment and
+# its baseline; scripts/profile_diff.py). Valid values only: bools 0/1, the known integers.
+# CP_RESOLUTION=3456x2160 RTBENCH_PRESET=Performance@3 RTBENCH_DENOISE=fx \
+#   RTBENCH_CVARS=MFX/OverrideEnable=1,MFX/Quality=4 RTBENCH_SCENARIO=cvarbatch \
+#   RTBENCH_EXPERIMENTS=../cp2077-metalfx-denoiser/experiments/pt-knobs-a.txt tools/rtbench pt
+RayTracing/EnableReferenceSER=0 profile
+Editor/PathTracing/UseScreenSpaceData=1 profile
+Editor/PathTracing/UseSSRFallback=0 profile
+Editor/SHARC/Bounces=2 profile
+Editor/SHARC/DownscaleFactor=8 profile
+Editor/SHARC/Enable=0 profile
+Editor/ReSTIRGI/Enable=0 profile
+Editor/ReSTIRGI/UseSpatialRGS=0 profile

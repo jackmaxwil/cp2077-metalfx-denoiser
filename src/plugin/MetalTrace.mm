@@ -725,13 +725,14 @@ void StartPerf(const std::string& name, uint64_t frames, uint64_t frame)
 
 // --- config variable batch -----------------------------------------------------------------------------------------
 // "cvarbatch": runs the experiments in <plugin dir>/cvar-experiments.txt ("<group>/<name>=<value>" per line, # comments;
-// a trailing " trace" also records frame traces "cvar<i>-exp" and "cvar<i>-base")
+// a trailing " trace" also records frame traces "cvar<i>-exp" and "cvar<i>-base", " profile" frame traces with GPU time
+// per encoder)
 // at the current spot. Per experiment: set, settle, screenshot, timing ("cvar<i>-exp"), restore the value read before,
 // settle, screenshot, timing ("cvar<i>-base"); one timing before the first ("cvar-pre"). Screenshots and the end of
 // the batch are requested from tools/cp-run by appending SHOT / CHECK / DONE events to red4ext/logs/autotest.log.
 struct Batch {
     std::vector<std::string> lines;
-    std::vector<bool> trace;
+    std::vector<int> trace; // 0 none, 1 frame trace, 2 frame trace with GPU time per encoder
     size_t index = 0;
     int phase = -1;
     uint64_t waitUntil = 0;
@@ -755,8 +756,10 @@ void StartBatch(uint64_t frame)
     for (std::string line; std::getline(f, line);) {
         if (!line.empty() && line[0] != '#' && line.find('=') != std::string::npos) {
             const bool trace = line.size() > 6 && line.compare(line.size() - 6, 6, " trace") == 0;
-            s_batch.lines.push_back(trace ? line.substr(0, line.size() - 6) : line);
-            s_batch.trace.push_back(trace);
+            const bool profile = line.size() > 8 && line.compare(line.size() - 8, 8, " profile") == 0;
+            s_batch.lines.push_back(trace ? line.substr(0, line.size() - 6) : profile ? line.substr(0, line.size() - 8) :
+                                            line);
+            s_batch.trace.push_back(trace ? 1 : profile ? 2 : 0);
         }
     }
     s_batch.active = !s_batch.lines.empty();
@@ -820,6 +823,7 @@ void StepBatch(uint64_t frame)
     case 3:
         if (b.trace[b.index]) {
             s_traceName = tag + "-exp";
+            s_profRequested = b.trace[b.index] == 2 && ProfReady();
             s_traceState.store(TraceState::Armed);
         }
         b.phase = 7;
@@ -841,6 +845,7 @@ void StepBatch(uint64_t frame)
     default:
         if (b.trace[b.index]) {
             s_traceName = tag + "-base";
+            s_profRequested = b.trace[b.index] == 2 && ProfReady();
             s_traceState.store(TraceState::Armed);
         }
         ++b.index;

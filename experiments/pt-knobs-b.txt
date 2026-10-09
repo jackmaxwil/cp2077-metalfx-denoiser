@@ -1,0 +1,9 @@
+# Path tracing cost knobs, second batch (see pt-knobs-a.txt).
+Editor/ReSTIRGI/EnableDeferredTracing=0 profile
+RayTracing/Reference/EnableRIS=0 profile
+Editor/RTXDI/PTEnableDirectEmissives=0 profile
+Editor/RTXDI/PTEnableDirectSkylight=0 profile
+RayTracing/AmbientOcclusionRayNumber=0 profile
+Editor/SHARC/Update=0 profile
+Editor/RTXDI/EnableAnalyticalLights=0 profile
+RayTracing/Reference/EnableFixed=0 profile
