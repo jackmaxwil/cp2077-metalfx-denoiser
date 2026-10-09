@@ -7,6 +7,7 @@
 #include <iostream>
 #include <mutex>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <sstream>
 
 namespace Logger
@@ -64,8 +65,18 @@ void Initialize()
     }
     else
     {
-        // The game runs with its folder as the working directory; one log per session, next to RED4ext's.
-        s_file.open("red4ext/logs/metalfxdenoiser.log", std::ios::out | std::ios::trunc);
+        // One log per session in RED4ext's logs folder, found from this plugin's location (red4ext/plugins/<name>/):
+        // the working directory depends on how the game was started.
+        std::string path = "red4ext/logs/metalfxdenoiser.log";
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<const void*>(&Initialize), &info) && info.dli_fname) {
+            std::string dir = info.dli_fname;
+            for (int up = 0; up < 3 && dir.find('/') != std::string::npos; ++up) {
+                dir = dir.substr(0, dir.find_last_of('/')); // the dylib, its plugin folder, plugins
+            }
+            path = dir + "/logs/metalfxdenoiser.log";
+        }
+        s_file.open(path, std::ios::out | std::ios::trunc);
     }
     s_initialized = true;
 }
