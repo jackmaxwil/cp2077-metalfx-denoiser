@@ -52,6 +52,7 @@
 #include <mach/mach_time.h>
 #include <type_traits>
 #include <map>
+#include <set>
 #include <cstdlib>
 #include <atomic>
 #include <cmath>
@@ -725,7 +726,8 @@ void StartPerf(const std::string& name, uint64_t frames, uint64_t frame)
 }
 
 // --- config variable batch -----------------------------------------------------------------------------------------
-// "cvarbatch": runs the experiments in <plugin dir>/cvar-experiments.txt ("<group>/<name>=<value>" per line, # comments;
+// "cvarbatch": runs the experiments in <plugin dir>/cvar-experiments.txt ("<group>/<name>=<value>" per line, several
+// joined by ';', # comments;
 // a trailing " trace" also records frame traces "cvar<i>-exp" and "cvar<i>-base", " profile" frame traces with GPU time
 // per encoder)
 // at the current spot. Per experiment: set, settle, screenshot, timing ("cvar<i>-exp"), restore the value read before,
@@ -737,7 +739,7 @@ struct Batch {
     size_t index = 0;
     int phase = -1;
     uint64_t waitUntil = 0;
-    std::string restore;
+    std::vector<std::string> restore; // "<path>=<value before>" per assignment of the current experiment
     bool active = false;
 };
 Batch s_batch;
@@ -785,7 +787,6 @@ void StepBatch(uint64_t frame)
         return;
     }
     const std::string tag = "cvar" + std::to_string(b.index);
-    const std::string path = b.index < b.lines.size() ? b.lines[b.index].substr(0, b.lines[b.index].find('=')) : "";
     auto log = [](const std::string& line) { std::ofstream(s_dir + "/cvar.jsonl", std::ios::app) << line << '\n'; };
     switch (b.phase) {
     case -1:
@@ -800,13 +801,27 @@ void StepBatch(uint64_t frame)
             b.active = false;
             return;
         }
-        const std::string current = ConfigVars::Apply(path); // read only: the value to restore
-        b.restore = ValueOf(current);
-        const std::string result = ConfigVars::Apply(b.lines[b.index]);
-        log(result);
-        if (b.restore.empty() || result.find("\"error\"") != std::string::npos) {
-            ++b.index; // refused (not verified, checks failed): nothing was changed
-            return;
+        // One experiment may set several variables: "<a>=<x>;<b>=<y>". All are checked before any is changed.
+        std::vector<std::string> sets;
+        for (size_t start = 0; start <= b.lines[b.index].size();) {
+            const size_t end = std::min(b.lines[b.index].find(';', start), b.lines[b.index].size());
+            sets.push_back(b.lines[b.index].substr(start, end - start));
+            start = end + 1;
+        }
+        b.restore.clear();
+        for (const std::string& set : sets) {
+            const std::string path = set.substr(0, set.find('='));
+            const std::string before = ValueOf(ConfigVars::Apply(path)); // read only: the value to restore
+            if (before.empty()) {
+                log("{\"path\":\"" + path + "\",\"error\":\"not readable; experiment skipped\"}");
+                ++b.index; // refused (not verified, checks failed): nothing was changed
+                return;
+            }
+            b.restore.push_back(path + "=" + before);
+        }
+        for (const std::string& set : sets) {
+            const std::string result = ConfigVars::Apply(set);
+            log(result);
         }
         b.waitUntil = frame + kSettleFrames;
         b.phase = 1;
@@ -830,7 +845,9 @@ void StepBatch(uint64_t frame)
         b.phase = 7;
         return;
     case 7:
-        log(ConfigVars::Apply(path + "=" + b.restore));
+        for (auto r = b.restore.rbegin(); r != b.restore.rend(); ++r) {
+            log(ConfigVars::Apply(*r));
+        }
         b.waitUntil = frame + kSettleFrames;
         b.phase = 4;
         return;
@@ -922,6 +939,10 @@ void PollRequests(uint64_t frame)
         }
     } else if (kind == "framegen") {
         FrameGen::SetEnabled(name == "on");
+    } else if (kind == "sharpen") {
+        Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
+    } else if (kind == "fgeval") {
+        FrameGen::Evaluate(std::atoi(name.c_str()));
     } else if (kind == "denoiseprepass") {
         Denoise::SetPrepass(name == "on");
     } else if (kind == "denoisecam") {
@@ -1519,10 +1540,22 @@ void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
                   (unsigned long)w, (unsigned long)h, fmt ? fmt : std::to_string(f).c_str());
     const std::string base = s_dir + "/" + name;
     [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
-      ConvertAndWrite(static_cast<const uint8_t*>(buffer.contents), w, h, f, base);
-      [buffer release];
+      // Off Metal's completion thread: converting a 4K image takes long enough to hold up the game's drawables.
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ConvertAndWrite(static_cast<const uint8_t*>(buffer.contents), w, h, f, base);
+        [buffer release];
+      });
     }];
 }
+
+} // namespace (reopened below)
+
+void MetalTrace::SaveTexture(id commandBuffer, id texture, const std::string& name)
+{
+    DumpTexture(commandBuffer, texture, name);
+}
+
+namespace {
 
 void BeginEncoder(id cb, id enc, char kind, int dispatchType, MTLRenderPassDescriptor* rp)
 {
@@ -1883,6 +1916,43 @@ id H_newBuf(id self, SEL sel, NSUInteger len, NSUInteger opts)
     NoteBuffer(b, 'd');
     return b;
 }
+
+// Sampler states: logs each distinct (LOD bias, anisotropy, mip filter) the game creates, the first 48, and adds
+// s_lodBiasAdd (SetSamplerLodBias) to the bias of mipmapped ones.
+Orig o_newSampler;
+std::atomic<float> s_lodBiasAdd{0.0f};
+id H_newSampler(id self, SEL sel, MTLSamplerDescriptor* d)
+{
+    const float add = s_lodBiasAdd.load(std::memory_order_relaxed);
+    MTLSamplerDescriptor* use = d;
+    if (@available(macOS 26.0, *)) {
+        if (add != 0.0f && d.mipFilter != MTLSamplerMipFilterNotMipmapped) {
+            use = [[d copy] autorelease];
+            use.lodBias = d.lodBias + add;
+        }
+        static std::mutex m;
+        static std::map<std::string, unsigned> seen;
+        char key[160];
+        std::snprintf(key, sizeof(key), "lodBias %.3f -> %.3f, anisotropy %lu, min %lu mag %lu mip %lu, argbuf %d",
+                      d.lodBias, use.lodBias, (unsigned long)d.maxAnisotropy, (unsigned long)d.minFilter,
+                      (unsigned long)d.magFilter, (unsigned long)d.mipFilter, d.supportArgumentBuffers ? 1 : 0);
+        std::lock_guard<std::mutex> lock(m);
+        if (++seen[key] == 1 && seen.size() <= 48) {
+            Logger::Info(std::string("Sampler: ") + key);
+        }
+    }
+    return ORIG(o_newSampler, id (*)(id, SEL, MTLSamplerDescriptor*), self)(self, sel, use);
+}
+
+} // namespace (reopened below)
+
+void MetalTrace::SetSamplerLodBias(float add)
+{
+    s_lodBiasAdd.store(add);
+    Logger::Info("Sampler LOD bias added: " + std::to_string(add));
+}
+
+namespace {
 
 id H_newBufBytes(id self, SEL sel, const void* bytes, NSUInteger len, NSUInteger opts)
 {
@@ -2645,6 +2715,23 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
             Logger::Info("Metal trace: first MetalFX temporal scaler call " + line);
         }
     }
+    {
+        // Jitter sequence: distinct offsets over the last 1024 calls (a temporal upscaler at scale s wants about 8*s^2).
+        static std::mutex m;
+        static std::set<std::pair<int, int>> seen;
+        static unsigned calls = 0;
+        id<MTLFXTemporalScaler> s = self;
+        std::lock_guard<std::mutex> lock(m);
+        seen.insert({int(lrintf(s.jitterOffsetX * 10000)), int(lrintf(s.jitterOffsetY * 10000))});
+        if (++calls % 1024 == 0) {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "MetalFX: %zu distinct jitter offsets in 1024 frames (%lux%lu -> %lux%lu)",
+                          seen.size(), (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
+                          (unsigned long)s.outputWidth, (unsigned long)s.outputHeight);
+            Logger::Info(buf);
+            seen.clear();
+        }
+    }
     if (!(Denoise::Active() && Denoise::EncodeScaler(self, cb))) {
         ORIG(o_fxTemporalEncode, V1, self)(self, sel, cb);
     }
@@ -2831,6 +2918,7 @@ bool Install()
     H(device, @selector(newComputePipelineStateWithFunction:error:), (IMP)H_cpsFn, o_cpsFn);
     H(device, @selector(newBufferWithLength:options:), (IMP)H_newBuf, o_newBuf);
     H(device, @selector(newBufferWithBytes:length:options:), (IMP)H_newBufBytes, o_newBufBytes);
+    H(device, @selector(newSamplerStateWithDescriptor:), (IMP)H_newSampler, o_newSampler);
     if (heap) {
         H(heap, @selector(newBufferWithLength:options:), (IMP)H_heapBuf, o_heapBuf);
         H(heap, @selector(newBufferWithLength:options:offset:), (IMP)H_heapBufOff, o_heapBufOff);

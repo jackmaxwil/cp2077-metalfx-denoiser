@@ -9,6 +9,11 @@ void SetEnabled(bool on);
 bool Enabled();
 // Generated frames presented since start.
 unsigned long long Generated();
+// Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate
+// between frames N-2 and N (frame N's motion doubled) and save the result next to the real frame N-1 as PNGs
+// (fgeval<i>-gen-j<0|1>, -real, -prev2, -cur; j1: the render jitter passed, j0: jitter 0, alternating), after three
+// samples of the normal path (fgnormal<i>-gen, -prev, -cur).
+void Evaluate(int samples);
 
 #ifdef __OBJC__ // the hooks (MetalTrace.mm); plain C++ (main.cpp, with RED4ext's Windows BOOL) sees only the above
 } // namespace FrameGen

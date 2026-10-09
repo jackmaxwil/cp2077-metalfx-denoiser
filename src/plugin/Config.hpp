@@ -50,7 +50,8 @@ struct Settings {
     bool ultraPerformance = false; // MetalFX at 3x (the engine's hidden Ultra Performance scale)
     bool frameGeneration = false;  // MetalFX frame interpolation (FrameGen.mm)
     Quality quality = Quality::Quality;
-    float sharpness = 0.5f;
+    float textureLodBias = 0.0f;  // added to the game's sampler LOD bias at startup (-0.585 matches 3x)
+    float sharpness = 0.0f;       // RCAS after the denoised scaler, 0 (off) to 1
     Features features;
     Debug debug;
 };

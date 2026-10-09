@@ -134,7 +134,9 @@ struct Camera {
 Camera g_cam; // guarded by g_mutex
 std::atomic<bool> g_camLogged{false};
 
-id<MTLComputePipelineState> g_copy, g_guides;
+id<MTLComputePipelineState> g_copy, g_guides, g_rcas, g_rcasArray;
+id<MTLTexture> g_sharpSrc; // the scaler's output, copied for RCAS to read
+std::atomic<float> g_sharpness{0.0f};
 id<MTLTexture> g_diffuse, g_specular, g_normal, g_roughness; // guide textures, input size
 id g_scaler;                                                  // id<MTLFXTemporalDenoisedScaler>
 
@@ -167,6 +169,43 @@ kernel void mfxd_guides(texture2d_array<float, access::read> base [[texture(0)]]
     normal.write(float4(normalize(nrm.read(p, 0).xyz * 2.0 - 1.0), 0.0), p);
     roughness.write(float4(m.g), p);
 }
+
+// RCAS (AMD FidelityFX FSR 1's robust contrast adaptive sharpening) on the upscaled HDR color, in a reversible tone
+// mapped space (c / (1 + max(c))) so its [0, 1] limits hold: a 5-tap cross whose negative lobe is limited so that no
+// channel leaves the range of its neighbours (no ringing, no halos).
+inline float3 mfxd_tm(float3 c) { return c / (1.0 + max(max(c.r, c.g), max(c.b, 0.0))); }
+inline float3 mfxd_itm(float3 t) { return t / max(1.0 - max(max(t.r, t.g), t.b), 1.0 / 65504.0); }
+
+inline float4 mfxd_rcas_color(texture2d<float, access::read> src, float amount, uint2 p)
+{
+    const int2 s = int2(src.get_width(), src.get_height()) - 1, q = int2(p);
+    auto at = [&](int2 o) { return mfxd_tm(src.read(uint2(clamp(q + o, int2(0), s))).rgb); };
+    const float4 c = src.read(p);
+    const float3 e = mfxd_tm(c.rgb), b = at(int2(0, -1)), d = at(int2(-1, 0)), f = at(int2(1, 0)), h = at(int2(0, 1));
+    const float3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));
+    const float3 hitMin = min(mn4, e) / (4.0 * mx4 + 1e-6);
+    const float3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0 - 1e-6);
+    const float3 lobeRGB = max(-hitMin, hitMax);
+    const float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * amount;
+    const float3 o = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
+    return float4(mfxd_itm(saturate(o)), c.a);
+}
+
+kernel void mfxd_rcas(texture2d<float, access::read> src [[texture(0)]],
+                      texture2d<float, access::write> dst [[texture(1)]],
+                      constant float& amount [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= dst.get_width() || p.y >= dst.get_height()) return;
+    dst.write(mfxd_rcas_color(src, amount, p), p);
+}
+
+kernel void mfxd_rcas_array(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d_array<float, access::write> dst [[texture(1)]],
+                            constant float& amount [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= dst.get_width() || p.y >= dst.get_height()) return;
+    dst.write(mfxd_rcas_color(src, amount, p), p, 0);
+}
 )";
 
 bool MakePipelines(id<MTLDevice> device)
@@ -180,8 +219,11 @@ bool MakePipelines(id<MTLDevice> device)
     if (copy && guides) {
         g_copy = [device newComputePipelineStateWithFunction:copy error:&error];
         g_guides = [device newComputePipelineStateWithFunction:guides error:&error];
+        g_rcas = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_rcas"] error:&error];
+        g_rcasArray = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_rcas_array"]
+                                                            error:&error];
     }
-    if (!g_copy || !g_guides) {
+    if (!g_copy || !g_guides || !g_rcas || !g_rcasArray) {
         Logger::Error(std::string("Denoise: kernels failed: ") +
                       (error ? error.localizedDescription.UTF8String : "no library"));
         g_copy = nil;
@@ -541,6 +583,46 @@ void RenderPass(id desc)
     }
 }
 
+void SetSharpness(float amount)
+{
+    amount = std::clamp(amount, 0.0f, 1.0f);
+    if (g_sharpness.exchange(amount) != amount) {
+        Logger::Info("Denoise: sharpening " + std::to_string(amount));
+    }
+}
+
+// RCAS on the scaler's output: copy it, then sharpen the copy back into it.
+void Sharpen(id<MTLCommandBuffer> cb, id<MTLTexture> output)
+{
+    const float amount = g_sharpness.load(std::memory_order_relaxed);
+    if (amount <= 0.0f || !g_rcas || !(output.usage & MTLTextureUsageShaderWrite) ||
+        (output.textureType != MTLTextureType2D && output.textureType != MTLTextureType2DArray)) {
+        return;
+    }
+    if (!g_sharpSrc || g_sharpSrc.width != output.width || g_sharpSrc.height != output.height ||
+        g_sharpSrc.pixelFormat != output.pixelFormat) {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:output.pixelFormat
+                                                                                       width:output.width
+                                                                                      height:output.height
+                                                                                   mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        g_sharpSrc = [output.device newTextureWithDescriptor:td];
+    }
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(output.width, output.height, 1) toTexture:g_sharpSrc destinationSlice:0
+         destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:output.textureType == MTLTextureType2D ? g_rcas : g_rcasArray];
+    [ce setTexture:g_sharpSrc atIndex:0];
+    [ce setTexture:output atIndex:1];
+    [ce setBytes:&amount length:sizeof(amount) atIndex:0];
+    [ce dispatchThreads:MTLSizeMake(output.width, output.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+}
+
 bool EncodeScaler(id scaler, id commandBuffer)
 {
     const uint64_t frame = g_frame.fetch_add(1);
@@ -636,6 +718,7 @@ bool EncodeScaler(id scaler, id commandBuffer)
         ds.worldToViewMatrix = worldToView;
         ds.viewToClipMatrix = viewToClip;
         [ds encodeToCommandBuffer:commandBuffer];
+        Sharpen(commandBuffer, output);
         return true;
     }
     return false;

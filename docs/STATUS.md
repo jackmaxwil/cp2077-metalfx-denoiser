@@ -153,6 +153,31 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
   29-34 ms. The display runs at 120 Hz, so intervals land on multiples of 8.3 ms. At the start screen and in menus the
   game does not call MetalFX, so frames pass through ("stale inputs").
 
+## 3x image quality (2026-10-08)
+
+Player report at 3x with frame generation: jagged edges, overly smooth textures, blocky in motion (only in motion,
+only with frame generation). Measured:
+- **Jitter:** the game already uses 72 jitter phases at 3x (8 x 3^2, as recommended for a temporal upscaler).
+- **Engine knobs do nothing here:** `Editor/MipBias/*`, `MFX/Sharpness`/`OverrideSharpness`, the CAS toggle and
+  `FSR2/EnableHalton`/`SampleNumber` changed nothing measurable (cvarbatch `experiments/pt-quality-a.txt`, several
+  variables per experiment now joined by ';'). The denoised scaler replaces the game's MetalFX call, so the game's own
+  sharpening never runs.
+- **Samplers:** every sampler the game creates has LOD bias 0 (any mip bias lives in its shaders). Adding -0.585
+  (2x to 3x) at creation: 2.5-4% more detail (Laplacian), slightly crisper textures. Setting `texture_lod_bias`
+  (applies at game start).
+- **Sharpening:** RCAS after the denoised scaler (in a reversible tone-mapped space, limited lobe, no halos). Detail
+  0.0156 at 0, 0.0170 at 0.25, 0.0193 at 0.5, 0.0234 at 0.75, 0.0333 at 1; 1 sharpens noise into grain, 0.3-0.5 is
+  the useful range. Setting `sharpness`, ModMenu slider; cost within frame noise.
+- **Frame interpolation quality** (`FrameGen::Evaluate`, request `fgeval <n>` in the framegen scenario's turn,
+  `scripts/fgeval_report.py`): a second interpolator on every other frame interpolates N-2 to N and is compared with
+  the real N-1. During a steady 1 degree per frame turn: 50-54 dB (repeating N: 31 dB, averaging N-2 and N: 33 dB).
+  The render jitter scores about 0.6 dB above jitter 0. Normal-path generated frames sit symmetrically between their
+  inputs. A turn has no parallax; blockiness in play likely comes from disocclusion and parallax at render-resolution
+  motion vectors and from the HUD being interpolated with the scene. After a reset the interpolator returns its color
+  input for two calls (the first test version, which reset every call, measured nothing).
+- Test-tool fix: PNG dumps are converted off Metal's completion thread (4K conversions there held up the game's
+  drawables and tripped frame generation's safety valve).
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.

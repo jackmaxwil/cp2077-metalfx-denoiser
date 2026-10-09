@@ -78,6 +78,14 @@ void OnFrameGenToggle(const ModMenuEntryPath*, bool on)
     FrameGen::SetEnabled(on);
 }
 
+void OnSharpnessChanged(const ModMenuEntryPath*, float value)
+{
+    if (const char* env = std::getenv("METALFX_SHARPNESS"); env && *env) { // tests set it themselves
+        return;
+    }
+    Denoise::SetSharpness(value);
+}
+
 bool Initialize()
 {
     if (g_initialized) {
@@ -103,6 +111,10 @@ bool Initialize()
         FrameGen::SetEnabled(config.frameGeneration);
     }
     s_noisy.store(config.debug.noisyLighting);
+    const char* lodEnv = std::getenv("METALFX_LODBIAS_ADD");
+    MetalTrace::SetSamplerLodBias(lodEnv && *lodEnv ? std::strtof(lodEnv, nullptr) : config.textureLodBias);
+    const char* sharpEnv = std::getenv("METALFX_SHARPNESS");
+    Denoise::SetSharpness(sharpEnv && *sharpEnv ? std::strtof(sharpEnv, nullptr) : config.sharpness);
     const bool denoiser = Denoise::Supported();
     if (denoiser) {
         ApplyMode();
@@ -170,6 +182,13 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                         .title = {"Frame generation: one generated frame per rendered frame (MetalFX)"},
                                         .defaultValue = FrameGen::Enabled(),
                                         .onChanged = &MetalFXDenoiser::OnFrameGenToggle};
+    const ModMenuSliderInfo sharpness = {.entryId = {"sharpness"},
+                                         .title = {"Sharpening after the Apple denoiser (0 = off)"},
+                                         .minValue = 0.0f,
+                                         .maxValue = 1.0f,
+                                         .step = 0.05f,
+                                         .defaultValue = Config::Get().sharpness,
+                                         .onChanged = &MetalFXDenoiser::OnSharpnessChanged};
     const ModMenuToggleInfo noisy = {.entryId = {"noisy_lighting"},
                                      .title = {"Debug: noisy lighting (no denoiser)"},
                                      .defaultValue = MetalFXDenoiser::s_noisy.load(),
@@ -178,6 +197,7 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                     api->RegisterToggle("MetalFXDenoiser", "main", &denoiser) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &ultra) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
+                    api->RegisterSlider("MetalFXDenoiser", "main", &sharpness) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");
     return ok;

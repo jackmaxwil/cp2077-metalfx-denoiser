@@ -18,6 +18,9 @@ bool SetPrepass(bool on);
 bool SetCameraMode(const std::string& mode);
 // Read the camera even when off (motion tests).
 void SetWatch(bool on);
+// Sharpening after the denoised scaler (RCAS, contrast adaptive): 0 off, 1 strongest. The game's own sharpening runs in
+// its MetalFX path, which the denoised scaler replaces.
+void SetSharpness(float amount);
 bool Active();
 // The projection of the latest ray traced frame (from NRD's constants): vertical field of view in degrees, near plane,
 // aspect ratio; false before the first.

@@ -12,6 +12,14 @@ enabled = true
 # Needs Resolution Scaling set to MetalFX. Also in ModMenu.
 ultra_performance = false
 
+# Sharper textures: added to the texture LOD bias of the game's samplers (negative = sharper mip levels). -0.585 matches
+# the 3x upscale (the game's bias suits 2x). Applies from the next game start; may add shimmer on fine detail.
+texture_lod_bias = 0.0
+
+# Sharpening after the Apple denoiser, 0 (off) to 1 (strongest): contrast adaptive (AMD's RCAS), against the softness
+# of the 3x upscale. The game's own sharpening setting does not apply with the denoiser. Also in ModMenu.
+sharpness = 0.0
+
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false

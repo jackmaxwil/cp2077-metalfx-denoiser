@@ -1,0 +1,13 @@
+# Image quality knobs at 3x path tracing with the denoiser: each experiment and its baseline get a screenshot at the
+# same frozen spot (cvarbatch). Several variables per experiment are joined by ';'. Valid values only.
+# CP_RESOLUTION=3456x2160 RTBENCH_PRESET=Performance@3 RTBENCH_DENOISE=fx \
+#   RTBENCH_CVARS=MFX/OverrideEnable=1,MFX/Quality=4 RTBENCH_SCENARIO=cvarbatch \
+#   RTBENCH_EXPERIMENTS=../cp2077-metalfx-denoiser/experiments/pt-quality-a.txt tools/rtbench pt
+Editor/MipBias/EnableCustomMipBias=1;Editor/MipBias/ForceCustomMipBias=-1.6
+Editor/MipBias/EnableCustomMipBias=1;Editor/MipBias/ForceCustomMipBias=0
+Editor/MipBias/EnableCustomMipBias=1;Editor/MipBias/ForceCustomMipBias=-2.5
+MFX/OverrideSharpness=1;MFX/Sharpness=0.5
+MFX/OverrideSharpness=1;MFX/Sharpness=1
+Developer/FeatureToggles/ConstrastAdaptiveSharpening=0
+FSR2/EnableHalton=1;FSR2/SampleNumber=72
+MFX/OverrideEnable=0

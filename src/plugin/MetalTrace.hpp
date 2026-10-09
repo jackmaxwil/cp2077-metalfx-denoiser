@@ -22,8 +22,21 @@ void OnFirstFrame(std::function<void()> fn);
 // METALFX_PERF_EVERY environment variable wins).
 void LogPerformance(uint64_t everyFrames);
 
+// Added to the LOD bias of every mipmapped sampler the game creates from now on (the game creates them at startup, with
+// bias 0): negative values pick sharper mip levels, to match the 3x upscale (log2(1/3) - log2(1/2) = -0.585).
+void SetSamplerLodBias(float add);
+
 // The CPU address of a GPU address inside one of the game's large shared heap buffers (registered at creation), if
 // len bytes from there are inside it; nullptr otherwise.
 const uint8_t* MapGpuAddress(uint64_t gpuAddress, size_t len);
+
+#ifdef __OBJC__
+} // namespace MetalTrace
+#include <objc/objc.h>
+#include <string>
+namespace MetalTrace {
+// Writes texture (2D, readable) as a PNG named <name> into the trace folder once commandBuffer completes.
+void SaveTexture(id commandBuffer, id texture, const std::string& name);
+#endif
 
 } // namespace MetalTrace

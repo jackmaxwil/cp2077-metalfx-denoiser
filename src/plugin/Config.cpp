@@ -117,6 +117,8 @@ bool Load(const std::string& path) {
                 s_settings.frameGeneration = ParseBool(value);
             } else if (key == "quality") {
                 s_settings.quality = QualityFromString(value);
+            } else if (key == "texture_lod_bias") {
+                s_settings.textureLodBias = ParseFloat(value);
             } else if (key == "sharpness") {
                 s_settings.sharpness = ParseFloat(value);
             }

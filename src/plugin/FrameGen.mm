@@ -22,12 +22,14 @@
 #include "FrameGen.hpp"
 #include "Denoise.hpp"
 #include "Logger.hpp"
+#include "MetalTrace.hpp"
 
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cmath>
 #include <mutex>
 #include <string>
@@ -41,7 +43,18 @@ std::mutex g_mutex;
 
 id g_interp; // id<MTLFXFrameInterpolator>
 id<MTLTexture> g_prev, g_cur, g_out, g_depth, g_motion;
-bool g_havePrev = false;
+id<MTLTexture> g_prev2; // frame N-2, only while an evaluation runs
+bool g_havePrev = false, g_havePrev2 = false;
+std::atomic<int> g_evalLeft{0};
+int g_evalIndex = 0, g_evalWait = 0, g_evalNormal = 0, g_evalWarm = 0;
+id g_evalInterp; // id<MTLFXFrameInterpolator>: its own history (a half-rate stream N-2, N, N+2, ...)
+// Jitter given to the interpolator: the render jitter of the frame. The color input is the upscaled (unjittered) image,
+// but depth and motion are the jittered render-resolution ones; measured with Evaluate during a turn, the render jitter
+// scores about 0.6 dB higher than 0 against the real in-between frame (50-54 dB either way). METALFX_FG_JITTER=0 passes 0.
+const bool g_passJitter = [] {
+    const char* env = std::getenv("METALFX_FG_JITTER");
+    return !(env && *env == '0');
+}();
 uint64_t g_inputsFrame = 0, g_frame = 0; // the frame (present count) whose depth and motion are in g_depth/g_motion
 float g_jitter[2] = {0, 0}, g_mvScale[2] = {1, 1};
 bool g_reset = true, g_depthReversed = true;
@@ -115,6 +128,18 @@ bool Fits(id<MTLTexture> t, id<MTLTexture> like)
 } // namespace
 
 namespace FrameGen {
+
+void Evaluate(int samples)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_evalLeft.store(std::max(0, samples));
+    g_havePrev2 = false;
+    g_evalWait = 0;
+    g_evalNormal = 0;
+    g_evalWarm = 0;
+    g_evalInterp = nil;
+    Logger::Info("FrameGen: evaluating " + std::to_string(samples) + " samples");
+}
 
 void SetEnabled(bool on)
 {
@@ -318,6 +343,61 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             Count(1);
         } else if (!g_havePrev) {
             Count(2);
+        } else if (g_evalLeft.load() > 0 && g_evalNormal >= 3 && g_havePrev2 && ++g_evalWait % 2 == 0 && g_interp) {
+            // Quality check: N-2 to N with doubled motion, against the real N-1 (in g_prev); no generated frame shown.
+            // A second interpolator sees only every other frame, so its previous color is always this call's N-2; its
+            // first call resets it, and the first two calls are not saved (after a reset it returns its color input).
+            const bool first = !g_evalInterp;
+            if (first) {
+                MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+                fd.colorTextureFormat = tex.pixelFormat;
+                fd.outputTextureFormat = tex.pixelFormat;
+                fd.depthTextureFormat = g_depth.pixelFormat;
+                fd.motionTextureFormat = g_motion.pixelFormat;
+                fd.inputWidth = g_depth.width;
+                fd.inputHeight = g_depth.height;
+                fd.outputWidth = tex.width;
+                fd.outputHeight = tex.height;
+                g_evalInterp = [fd newFrameInterpolatorWithDevice:dev];
+            }
+            id<MTLFXFrameInterpolator> fi = g_evalInterp;
+            const bool jitter = g_evalIndex % 2 == 1;
+            fi.colorTexture = g_cur;
+            fi.prevColorTexture = g_prev2;
+            fi.depthTexture = g_depth;
+            fi.motionTexture = g_motion;
+            fi.outputTexture = g_out;
+            fi.motionVectorScaleX = 2 * g_mvScale[0];
+            fi.motionVectorScaleY = 2 * g_mvScale[1];
+            fi.jitterOffsetX = jitter ? g_jitter[0] : 0.0f;
+            fi.jitterOffsetY = jitter ? g_jitter[1] : 0.0f;
+            fi.deltaTime = static_cast<float>(2 * dt);
+            float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
+            Denoise::Projection(fov, nearPlane, aspect);
+            fi.nearPlane = nearPlane;
+            fi.farPlane = 20000.0f;
+            fi.fieldOfView = fov;
+            fi.aspectRatio = aspect;
+            fi.depthReversed = g_depthReversed;
+            fi.shouldResetHistory = first;
+            [fi encodeToCommandBuffer:cb];
+            if (++g_evalWarm <= 2) {
+                goto evalDone;
+            }
+            {
+            const std::string base = "fgeval" + std::to_string(g_evalIndex);
+            MetalTrace::SaveTexture(cb, g_out, base + "-gen-j" + (jitter ? "1" : "0"));
+            MetalTrace::SaveTexture(cb, g_prev, base + "-real");
+            MetalTrace::SaveTexture(cb, g_prev2, base + "-prev2");
+            MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
+            ++g_evalIndex;
+            if (g_evalLeft.fetch_sub(1) == 1) {
+                Logger::Info("FrameGen: evaluation done");
+                g_evalInterp = nil;
+            }
+            }
+        evalDone:
+            g_reset = true; // the game-rate interpolator skipped this frame: its history no longer matches g_prev
         } else {
             id<MTLFXFrameInterpolator> fi = g_interp;
             if (!fi || fi.inputWidth != g_depth.width || fi.inputHeight != g_depth.height ||
@@ -350,8 +430,8 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.outputTexture = g_out;
                 fi.motionVectorScaleX = g_mvScale[0];
                 fi.motionVectorScaleY = g_mvScale[1];
-                fi.jitterOffsetX = g_jitter[0];
-                fi.jitterOffsetY = g_jitter[1];
+                fi.jitterOffsetX = g_passJitter ? g_jitter[0] : 0.0f;
+                fi.jitterOffsetY = g_passJitter ? g_jitter[1] : 0.0f;
                 fi.deltaTime = static_cast<float>(dt);
                 float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
                 Denoise::Projection(fov, nearPlane, aspect);
@@ -360,9 +440,16 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.fieldOfView = fov;
                 fi.aspectRatio = aspect;
                 fi.depthReversed = g_depthReversed;
+                const bool wasReset = g_reset;
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
+                if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
+                    const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
+                    MetalTrace::SaveTexture(cb, g_out, base + "-gen");
+                    MetalTrace::SaveTexture(cb, g_prev, base + "-prev");
+                    MetalTrace::SaveTexture(cb, g_cur, base + "-cur");
+                }
                 Count(4);
                 g_generated.fetch_add(1);
             }
@@ -373,6 +460,15 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         [blit copyFromTexture:g_cur toTexture:real.texture];
         [blit endEncoding];
+        if (g_evalLeft.load() > 0) { // keep N-1 as the next frame's N-2
+            if (!Fits(g_prev2, tex)) {
+                g_prev2 = Make(dev, tex.pixelFormat, tex.width, tex.height, colorUsage);
+            }
+            id<MTLBlitCommandEncoder> keep = [cb blitCommandEncoder];
+            [keep copyFromTexture:g_prev toTexture:g_prev2];
+            [keep endEncoding];
+            g_havePrev2 = g_havePrev && fresh;
+        }
         std::swap(g_prev, g_cur);
         g_havePrev = fresh;
         if (!fresh) {
