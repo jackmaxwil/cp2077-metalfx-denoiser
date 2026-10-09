@@ -5,9 +5,12 @@
 //   into our own textures, so the next frame cannot overwrite them before the interpolation reads them.
 // - At present (Present, on the game's last command buffer): copy the presented image into our history, run
 //   MTLFXFrameInterpolator on frames N-1 and N (color: the presented images, post-processing and HUD included; depth and
-//   motion: frame N's), write the result into a second drawable, present that, then present frame N at least half a
-//   frame interval later (presentDrawable:afterMinimumDuration:). The generated frame is shown between N-1 and N; frame
-//   N is shown half a frame later than it would be.
+//   motion: frame N's), and show the generated frame, then frame N at least half a frame interval later
+//   (presentDrawable:afterMinimumDuration:), through an overlay layer of our own (a sublayer covering the game's layer,
+//   with the game's pixel format and EDR settings and its own three drawables). The game's drawables are never
+//   presented and go straight back to its pool: taking extra drawables from the game's layer (three in all) starved it
+//   in fullscreen, where each nextDrawable then waited up to its one second timeout (a frame every 1-10 s).
+// - Safety valve: three overlay drawable waits over 50 ms in a row turn frame generation off (logged).
 // - The presented images must be readable: the layer's framebufferOnly is turned off at the first present (from the
 //   next drawable on).
 // Camera: near plane, vertical field of view and aspect ratio from NRD's constants (Denoise::Projection; the game renders
@@ -174,6 +177,71 @@ void AfterScaler(id scaler, id commandBuffer)
     g_inputsFrame = g_frame + 1; // for the frame being presented next
 }
 
+// The overlay layer frames are shown through while frame generation is on (see the header comment). Created and removed
+// on the main thread; the render thread only uses it once it is set.
+CAMetalLayer* g_overlay;
+bool g_overlayPending = false;
+int g_slowDrawables = 0; // consecutive overlay drawable waits over 50 ms (the safety valve)
+
+void SetupOverlay(CAMetalLayer* game)
+{
+    auto make = ^{
+        CAMetalLayer* o = [CAMetalLayer layer];
+        o.device = game.device;
+        o.pixelFormat = game.pixelFormat;
+        o.colorspace = game.colorspace;
+        o.wantsExtendedDynamicRangeContent = game.wantsExtendedDynamicRangeContent;
+        o.EDRMetadata = game.EDRMetadata;
+        o.framebufferOnly = NO;
+        o.opaque = YES;
+        o.contentsScale = game.contentsScale;
+        o.drawableSize = game.drawableSize;
+        o.frame = game.bounds;
+        o.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        o.maximumDrawableCount = 3;
+        o.displaySyncEnabled = YES;
+        [game addSublayer:o];
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_overlay = o;
+        g_overlayPending = false;
+        Logger::Info("FrameGen: overlay layer ready");
+    };
+    if ([NSThread isMainThread]) {
+        make();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), make);
+    }
+}
+
+void RemoveOverlay() // caller holds g_mutex
+{
+    if (!g_overlay) {
+        return;
+    }
+    CAMetalLayer* o = g_overlay;
+    g_overlay = nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [o removeFromSuperlayer];
+    });
+}
+
+// A drawable of the overlay; counts slow waits and turns frame generation off after three in a row.
+id<CAMetalDrawable> OverlayDrawable()
+{
+    const double t0 = CACurrentMediaTime();
+    id<CAMetalDrawable> d = [g_overlay nextDrawable];
+    const double waited = CACurrentMediaTime() - t0;
+    g_slowDrawables = waited > 0.05 ? g_slowDrawables + 1 : 0;
+    if (g_slowDrawables >= 3) {
+        Logger::Error("FrameGen: waited " + std::to_string(static_cast<int>(waited * 1000)) +
+                      " ms for a drawable three times in a row: frame generation off");
+        g_on.store(false);
+        g_slowDrawables = 0;
+        RemoveOverlay();
+    }
+    return d;
+}
+
 bool Present(id commandBuffer, id drawable, const std::function<void(id)>& present,
              const std::function<void(id, double)>& presentAfter)
 {
@@ -192,6 +260,10 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         Logger::Info(buf);
     }
     if (!Enabled() || !layer || !tex) {
+        if (g_overlay) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            RemoveOverlay(); // the game's own presents show again
+        }
         return false;
     }
     if (@available(macOS 26.0, *)) {
@@ -203,10 +275,17 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             Count(0);
             return false;
         }
-        if (g_inputsFrame != g_frame || !g_depth) {
-            g_havePrev = false; // no MetalFX call this frame (menus, loading): nothing to interpolate with
-            Count(1);
-            return false;
+        if (!g_overlay) {
+            if (!g_overlayPending) {
+                g_overlayPending = true;
+                lock.unlock();
+                SetupOverlay(layer);
+            }
+            return false; // the game presents until the overlay is up
+        }
+        if (g_overlay.drawableSize.width != layer.drawableSize.width ||
+            g_overlay.drawableSize.height != layer.drawableSize.height) {
+            g_overlay.drawableSize = layer.drawableSize;
         }
         id<MTLDevice> dev = tex.device;
         const MTLTextureUsage colorUsage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
@@ -218,31 +297,6 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             g_havePrev = false;
             g_interp = nil;
         }
-        id<MTLFXFrameInterpolator> fi = g_interp;
-        if (!fi || fi.inputWidth != g_depth.width || fi.inputHeight != g_depth.height ||
-            fi.depthTextureFormat != g_depth.pixelFormat || fi.motionTextureFormat != g_motion.pixelFormat) {
-            MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
-            fd.colorTextureFormat = tex.pixelFormat;
-            fd.outputTextureFormat = tex.pixelFormat;
-            fd.depthTextureFormat = g_depth.pixelFormat;
-            fd.motionTextureFormat = g_motion.pixelFormat;
-            fd.inputWidth = g_depth.width;
-            fd.inputHeight = g_depth.height;
-            fd.outputWidth = tex.width;
-            fd.outputHeight = tex.height;
-            fi = [fd newFrameInterpolatorWithDevice:dev];
-            g_interp = fi;
-            g_havePrev = false;
-            char buf[200];
-            std::snprintf(buf, sizeof(buf), "FrameGen: interpolator %lux%lu -> %lux%lu (color %lu) %s",
-                          (unsigned long)g_depth.width, (unsigned long)g_depth.height, (unsigned long)tex.width,
-                          (unsigned long)tex.height, (unsigned long)tex.pixelFormat, fi ? "ready" : "unavailable");
-            Logger::Info(buf);
-            if (!fi) {
-                g_on.store(false);
-                return false;
-            }
-        }
         id<MTLCommandBuffer> cb = commandBuffer;
         const double now = CACurrentMediaTime();
         const double dt = g_lastPresent > 0 ? std::min(0.1, now - g_lastPresent) : 1.0 / 30.0;
@@ -250,65 +304,88 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit copyFromTexture:tex toTexture:g_cur];
         [blit endEncoding];
-        if (!g_havePrev) {
+
+        // The game's frame through the overlay; its own drawable goes back to its pool unpresented.
+        id<CAMetalDrawable> real = OverlayDrawable();
+        if (!real || !g_on.load()) {
             std::swap(g_prev, g_cur);
-            g_havePrev = true;
-            g_reset = true;
+            return false;
+        }
+        // A generated frame before it, when this frame has depth and motion and there is a previous frame.
+        id<CAMetalDrawable> generated = nil;
+        const bool fresh = g_inputsFrame == g_frame && g_depth;
+        if (!fresh) {
+            Count(1);
+        } else if (!g_havePrev) {
             Count(2);
-            return false;
+        } else {
+            id<MTLFXFrameInterpolator> fi = g_interp;
+            if (!fi || fi.inputWidth != g_depth.width || fi.inputHeight != g_depth.height ||
+                fi.depthTextureFormat != g_depth.pixelFormat || fi.motionTextureFormat != g_motion.pixelFormat) {
+                MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+                fd.colorTextureFormat = tex.pixelFormat;
+                fd.outputTextureFormat = tex.pixelFormat;
+                fd.depthTextureFormat = g_depth.pixelFormat;
+                fd.motionTextureFormat = g_motion.pixelFormat;
+                fd.inputWidth = g_depth.width;
+                fd.inputHeight = g_depth.height;
+                fd.outputWidth = tex.width;
+                fd.outputHeight = tex.height;
+                fi = [fd newFrameInterpolatorWithDevice:dev];
+                g_interp = fi;
+                char buf[200];
+                std::snprintf(buf, sizeof(buf), "FrameGen: interpolator %lux%lu -> %lux%lu (color %lu) %s",
+                              (unsigned long)g_depth.width, (unsigned long)g_depth.height, (unsigned long)tex.width,
+                              (unsigned long)tex.height, (unsigned long)tex.pixelFormat, fi ? "ready" : "unavailable");
+                Logger::Info(buf);
+            }
+            generated = fi ? OverlayDrawable() : nil;
+            if (!generated) {
+                Count(3);
+            } else {
+                fi.colorTexture = g_cur;
+                fi.prevColorTexture = g_prev;
+                fi.depthTexture = g_depth;
+                fi.motionTexture = g_motion;
+                fi.outputTexture = g_out;
+                fi.motionVectorScaleX = g_mvScale[0];
+                fi.motionVectorScaleY = g_mvScale[1];
+                fi.jitterOffsetX = g_jitter[0];
+                fi.jitterOffsetY = g_jitter[1];
+                fi.deltaTime = static_cast<float>(dt);
+                float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
+                Denoise::Projection(fov, nearPlane, aspect);
+                fi.nearPlane = nearPlane;
+                fi.farPlane = 20000.0f;
+                fi.fieldOfView = fov;
+                fi.aspectRatio = aspect;
+                fi.depthReversed = g_depthReversed;
+                fi.shouldResetHistory = g_reset;
+                g_reset = false;
+                [fi encodeToCommandBuffer:cb];
+                Count(4);
+                g_generated.fetch_add(1);
+            }
         }
-        id<CAMetalDrawable> extra = [layer nextDrawable];
-        if (!extra) {
-            std::swap(g_prev, g_cur);
-            Count(3);
-            return false;
+        blit = [cb blitCommandEncoder];
+        if (generated) {
+            [blit copyFromTexture:g_out toTexture:generated.texture];
         }
-        fi.colorTexture = g_cur;
-        fi.prevColorTexture = g_prev;
-        fi.depthTexture = g_depth;
-        fi.motionTexture = g_motion;
-        // Straight into the extra drawable when it allows it (saves a full-size copy), else via g_out.
-        id<MTLTexture> target = extra.texture;
-        const bool direct = (target.usage & fi.outputTextureUsage) == fi.outputTextureUsage &&
-                            target.storageMode == MTLStorageModePrivate;
-        static std::atomic<bool> usageLogged{false};
-        if (!usageLogged.exchange(true)) {
-            Logger::Info("FrameGen: drawable usage " + std::to_string(target.usage) + ", interpolator output needs " +
-                         std::to_string(fi.outputTextureUsage) + (direct ? ": writing into the drawable" :
-                                                                           ": writing through a copy"));
-        }
-        fi.outputTexture = direct ? target : g_out;
-        fi.motionVectorScaleX = g_mvScale[0];
-        fi.motionVectorScaleY = g_mvScale[1];
-        fi.jitterOffsetX = g_jitter[0];
-        fi.jitterOffsetY = g_jitter[1];
-        fi.deltaTime = static_cast<float>(dt);
-        float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
-        Denoise::Projection(fov, nearPlane, aspect);
-        fi.nearPlane = nearPlane;
-        fi.farPlane = 20000.0f;
-        fi.fieldOfView = fov;
-        fi.aspectRatio = aspect;
-        fi.depthReversed = g_depthReversed;
-        fi.shouldResetHistory = g_reset;
-        g_reset = false;
-        [fi encodeToCommandBuffer:cb];
-        if (!direct) {
-            blit = [cb blitCommandEncoder];
-            [blit copyFromTexture:g_out toTexture:target];
-            [blit endEncoding];
-        }
+        [blit copyFromTexture:g_cur toTexture:real.texture];
+        [blit endEncoding];
         std::swap(g_prev, g_cur);
-        Count(4);
-        g_generated.fetch_add(1);
+        g_havePrev = fresh;
+        if (!fresh) {
+            g_reset = true;
+        }
         lock.unlock();
-        NoteShown(extra);
-        NoteShown(d);
-        present(extra);              // the generated frame, between N-1 and N
-        presentAfter(drawable, dt / 2); // frame N half a frame interval later
-        if (g_logged.load() < 3) {
-            g_logged.fetch_add(1);
-            Logger::Info("FrameGen: presenting generated frames");
+        if (generated) {
+            NoteShown(generated);
+            NoteShown(real);
+            present(generated);         // between the previous frame and this one
+            presentAfter(real, dt / 2); // this frame half a frame interval later
+        } else {
+            present(real);
         }
         return true;
     }

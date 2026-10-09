@@ -134,6 +134,14 @@ but no noisy half was visible in motion (rtbench `-split`, 2026-10-08): not a us
   and the readable swapchain included): about 29.5 rendered fps, about 59 displayed. 240 of 240 presents generated.
   Displayed pacing can only be judged on screen (a covered window reports no presented times). The HUD is
   interpolated with the scene (no separate UI texture). Player setting `[metalfx] frame_generation`, ModMenu toggle.
+  First fullscreen play: a frame every 1-10 s. Taking the second drawable from the game's own layer (three drawables)
+  starved it in fullscreen, where nextDrawable then waits up to its one second timeout (a covered window, as in the
+  background tests, gives drawables back at once). Fixed: frames are shown through an overlay layer of our own (a
+  sublayer with the game's format and EDR settings and its own drawables); the game's drawables are never presented
+  and go back to its pool. Safety valve: three overlay drawable waits over 50 ms in a row turn it off. Background
+  test after the fix: 240 of 240 presents generated, 33.5 ms per rendered frame.
+- **Player report (3x path tracing, Apple denoiser, no frame generation):** very stable, good performance, very good
+  graphics; the 3x scale is only slightly noticeable. 27-32 ms per frame in play.
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
