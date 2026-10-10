@@ -105,8 +105,9 @@ void OnFrame()
     const double target = 1.0 / s_target;
     if (s_ema > target * 1.04 && s_scale < kMax) {
         Set(std::min(kMax, s_scale + kStep), "over the target");
-    } else if (s_ema < target && s_scale > s_min && Predict(s_ema, s_scale, s_scale - kStep) < target * 0.97) {
-        Set(s_scale - kStep, "room under the target");
+    } else if (const float down = std::max(s_min, s_scale - kStep);
+               s_ema < target && s_scale > s_min && Predict(s_ema, s_scale, down) < target * 0.97) {
+        Set(down, "room under the target");
     } else {
         return;
     }
