@@ -33,6 +33,7 @@
 #include "Denoise.hpp"
 #include "DynamicScale.hpp"
 #include "Input.hpp"
+#include "Warp.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
 
@@ -955,6 +956,10 @@ void PollRequests(uint64_t frame)
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
         FrameGen::Evaluate(std::atoi(name.c_str()));
+    } else if (kind == "warpeval") {
+        FrameGen::WarpEval(std::atoi(name.c_str()));
+    } else if (kind == "warp") {
+        Warp::SetEnabled(name == "on");
     } else if (kind == "framelimit") {
         Input::SetFrameLimit(std::strtof(name.c_str(), nullptr));
     } else if (kind == "dynscale") {

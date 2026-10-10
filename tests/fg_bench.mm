@@ -186,7 +186,7 @@ int main(int argc, char** argv)
                    [ce endEncoding];
                }));
         id<MTLFence> fence = getenv("FG_BENCH_FENCE") ? [d newFence] : nil; // as FrameGen (interpolator fence)
-        auto hudPass = [&](id<MTLCommandBuffer> cb, float mv) {
+        auto hudPass = [&](id<MTLCommandBuffer> cb, float mv, bool warp = false) {
             id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
             if (fence) {
                 [ce waitForFence:fence];
@@ -201,7 +201,12 @@ int main(int argc, char** argv)
             struct {
                 uint32_t debug, hasLow;
                 simd_float2 mvToOut, outToIn;
-            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh)};
+                uint32_t warp;
+                simd_float4x4 P, Pinv;
+                simd_float3x3 M;
+            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u,
+                        matrix_identity_float4x4, matrix_identity_float4x4,
+                        simd_matrix3x3(simd_quaternion(0.02f, simd_make_float3(0, 1, 0)))}; // a 1 degree turn
             [ce setBytes:&params length:sizeof(params) atIndex:0];
             [ce dispatchThreads:MTLSizeMake(ow, oh, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             [ce endEncoding];
@@ -209,6 +214,8 @@ int main(int argc, char** argv)
         // Motion is noise of about 0.1-1 render pixels: scale 0 skips the motion path, 30 takes it everywhere.
         printf("| HUD restore, still | %.3f |\n", Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 0); }));
         printf("| HUD restore, moving | %.3f |\n", Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 30); }));
+        printf("| HUD restore, moving, with camera warp | %.3f |\n",
+               Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 30, true); }));
 
         // Everything FrameGen does per rendered frame, in one command buffer (as in the game's).
         id<MTLFXFrameInterpolator> fi = Interpolator(d, 1536, 960, ow, oh);

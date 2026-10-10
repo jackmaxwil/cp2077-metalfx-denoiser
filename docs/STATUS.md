@@ -306,6 +306,14 @@ Setup measured: RT Psycho, Ultra Performance 2.25x (1536x960 -> 3456x2160), the 
 - **Frame limiter before the input read** (frame_limit_fps; request "framelimit"): waits at the game's first event pump of
   a frame, so the frame starts from fresh input; use it instead of the game's Maximum FPS. 29 for 4x at 120 Hz.
 - 4x costs about 6-7 ms per frame with path tracing (41-43 -> 48 ms, GPU-bound).
+- **Camera warp** (camera_warp, 4x; Warp.mm): each shown frame is turned to the game's mouse input at its display time
+  minus the input lead (the 90th percentile of display time minus the newest mouse event, about 60 ms), by the
+  events' own timestamps, so turns show up about a frame sooner and stay smooth. Rotation only, at most 4 degrees,
+  HUD unturned; calibrated live (camera turn between frames against the game's mouse counts between them): in game
+  with synthetic turns -0.82 / -0.85 mrad per count, R2 0.83-0.94 (0.873 measured before); off while the fit is poor.
+  The camera comes from NRD's constants, so the warp turns Denoise's hooks on (its watch mode) also with the Apple
+  denoiser off. Check (warpcheck, scripts/warpeval_report.py): a warped game frame is closer to the next game frame
+  than the frame itself in 8 of 8 pairs, 19.2 -> 23.2 dB. Cost: none measurable (HUD pass 0.31 ms either way).
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 

@@ -115,6 +115,8 @@ bool Load(const std::string& path) {
                 s_settings.ultraPerformance = ParseBool(value);
             } else if (key == "frame_generation") {
                 s_settings.frameGeneration = ParseBool(value);
+            } else if (key == "camera_warp") {
+                s_settings.cameraWarp = ParseBool(value);
             } else if (key == "frame_limit_fps") {
                 s_settings.frameLimitFps = ParseFloat(value);
             } else if (key == "dynamic_scale_fps") {

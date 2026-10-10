@@ -32,7 +32,9 @@ kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], textur
             b = max(b, src.read(uint2(clamp(int2(p) + int2(x, y), int2(0), m)), lod).a);
     dst.write(float4(b), p);
 }
-struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; };
+// warp != 0: the scene is turned (camera warp, Warp.mm): each output pixel samples gen where its direction lies in gen's
+// view (M: new view to gen's view; P: view to clip); HUD pixels stay put.
+struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; uint warp; float4x4 P; float4x4 Pinv; float3x3 M; };
 // Half size (each texel the mean of 2x2: one bilinear sample at their shared corner), for interpolating at half output.
 kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
                     uint2 p [[thread_position_in_grid]])
@@ -41,6 +43,7 @@ kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture
     if (p.x < dst.get_width() && p.y < dst.get_height())
         dst.write(src.sample(bilinear, (float2(p) + 0.5) / float2(dst.get_width(), dst.get_height())), p);
 }
+static inline int2 s_max(texture2d<float, access::read> t) { return int2(t.get_width(), t.get_height()) - 1; }
 // The generated frame (gen, output size or smaller: sampled bilinear) into dst, with the real frame's (cur) pixels
 // wherever the HUD or its copies may be.
 kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
@@ -86,7 +89,19 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
     else if (a > 0.0) dst.write(cur.read(p), p);
     else {
         constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
-        dst.write(gen.sample(bilinear, (float2(p) + 0.5) / float2(dst.get_width(), dst.get_height())), p);
+        const float2 size = float2(dst.get_width(), dst.get_height());
+        float2 uv = (float2(p) + 0.5) / size;
+        if (h.warp != 0u) {
+            const float4 v = h.Pinv * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.5, 1.0);
+            const float4 c = h.P * float4(h.M * (v.xyz / v.w), 1.0);
+            const float2 s = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+            // Where the turned direction lands on the HUD, the scene there is hidden: keep this pixel unturned.
+            const int2 q = int2(clamp(s * size, float2(0.0), size - 1.0));
+            const bool hudThere = ui.read(uint2(clamp(q, int2(0), s_max(ui)))).r > 0.0 ||
+                                  (h.hasLow != 0u && low.read(uint2(clamp(q / 16, int2(0), s_max(low)))).r > 0.0);
+            if (!hudThere) uv = s;
+        }
+        dst.write(gen.sample(bilinear, uv), p);
     }
 }
 )";

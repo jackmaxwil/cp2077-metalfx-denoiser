@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -21,6 +22,11 @@ namespace {
 
 std::mutex g_mutex;
 Input::FrameInput g_pending, g_current; // the newest mouse event since the last present call; the current frame's
+struct Sample {
+    double t, x, y; // event time, cumulative movement
+};
+std::deque<Sample> g_samples; // the last eight seconds
+double g_x = 0, g_y = 0;
 
 using NextFn = NSEvent* (*)(id, SEL, NSEventMask, NSDate*, NSRunLoopMode, BOOL);
 NextFn o_next = nullptr;
@@ -61,6 +67,12 @@ NSEvent* H_next(id self, SEL sel, NSEventMask mask, NSDate* until, NSRunLoopMode
             std::lock_guard<std::mutex> lock(g_mutex);
             g_pending.event = ev.timestamp; // seconds since boot: the same clock as CACurrentMediaTime
             g_pending.read = CACurrentMediaTime();
+            g_x += ev.deltaX;
+            g_y += ev.deltaY;
+            g_samples.push_back({ev.timestamp, g_x, g_y});
+            while (g_samples.size() > 2 && ev.timestamp - g_samples[1].t > 8.0) {
+                g_samples.pop_front();
+            }
         }
     }
     return ev;
@@ -113,6 +125,8 @@ void BeginFrame()
     std::lock_guard<std::mutex> lock(g_mutex);
     g_current = g_pending;
     g_current.present = CACurrentMediaTime();
+    g_current.x = g_x;
+    g_current.y = g_y;
     g_pending = {};
 }
 
@@ -120,6 +134,34 @@ FrameInput Current()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_current;
+}
+
+bool Counts(double t, double& x, double& y, double* latest)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_samples.empty()) {
+        x = g_x;
+        y = g_y;
+        return false;
+    }
+    if (latest) {
+        *latest = g_samples.back().t;
+    }
+    if (t >= g_samples.back().t) {
+        x = g_samples.back().x;
+        y = g_samples.back().y;
+        return true;
+    }
+    if (t < g_samples.front().t) {
+        return false;
+    }
+    auto it = std::upper_bound(g_samples.begin(), g_samples.end(), t, [](double v, const Sample& s) { return v < s.t; });
+    const Sample& b = *it;
+    const Sample& a = *(it - 1);
+    const double f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1.0;
+    x = a.x + (b.x - a.x) * f;
+    y = a.y + (b.y - a.y) * f;
+    return true;
 }
 
 void Track(id drawable, const FrameInput& in, const char* path)

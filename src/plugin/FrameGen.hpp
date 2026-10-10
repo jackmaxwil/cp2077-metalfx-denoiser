@@ -14,6 +14,9 @@ int Multiplier();
 // Tests: 4x's halving and interpolations in the game's command buffer (true) or on the pacer's queue (request
 // "fgqueue game|own").
 void SetGenerateOnGameQueue(bool on);
+// Tests (request "warpeval <n>", 4x with camera warp): the next n game frames shown, as wevNN-real and (when warped)
+// wevNN-warped; scripts/warpeval_report.py scores warped N and plain N against N+1.
+void WarpEval(int frames);
 // Generated frames presented since start.
 unsigned long long Generated();
 // Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate

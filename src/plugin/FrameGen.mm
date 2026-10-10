@@ -23,6 +23,7 @@
 #include "FrameGen.hpp"
 #include "FrameGenHud.h"
 #include "Input.hpp"
+#include "Warp.hpp"
 #include "Denoise.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
@@ -134,7 +135,7 @@ struct HudInputs {
 id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerated)
 
 void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, const HudInputs& h, id<MTLTexture> dst,
-                float mvFactor)
+                float mvFactor, const Warp::Params* warp = nullptr)
 {
     MetalTrace::Internal internal;
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
@@ -151,9 +152,18 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     struct {
         uint32_t debug, hasLow;
         simd_float2 mvToOut, outToIn;
+        uint32_t warp;
+        simd_float4x4 P, Pinv;
+        simd_float3x3 M;
     } params = {g_hudDebug.load() ? 1u : 0u, h.low ? 1u : 0u,
                 simd_make_float2(h.motion ? h.mvScale[0] * sx * mvFactor : 0.0f, h.motion ? h.mvScale[1] * sy * mvFactor : 0.0f),
-                simd_make_float2(1.0f / sx, 1.0f / sy)};
+                simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, matrix_identity_float4x4,
+                matrix_identity_float4x4, matrix_identity_float3x3};
+    if (warp) {
+        params.P = warp->P;
+        params.Pinv = warp->Pinv;
+        params.M = warp->M;
+    }
     [ce setBytes:&params length:sizeof(params) atIndex:0];
     [ce dispatchThreads:MTLSizeMake(dst.width, dst.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
@@ -574,7 +584,11 @@ struct Job {
     double dt, interval;
     CAMetalLayer* layer;
     Input::FrameInput input;
+    Warp::View view, prevView; // this frame's and the previous frame's camera and input (camera warp)
 };
+Warp::View g_prevView;
+std::atomic<int> g_warpEvalLeft{0}; // request "warpeval <n>": the next n game frames shown, warped and not
+int g_warpEvalIndex = 0;
 std::mutex g_jobMutex;
 std::condition_variable g_jobCv;
 std::deque<Job> g_jobs;
@@ -714,16 +728,37 @@ void Pacer()
                     continue;
                 }
                 id<MTLCommandBuffer> cb = [g_pacerQueue commandBuffer];
+                // Camera warp: this image (phase i+1 quarters of the way from the previous frame; the game's frame at
+                // 1) turned to the input at its display time minus the input lead.
+                const double shownAt = CACurrentMediaTime() + g_refresh;
+                const double phase = i < 3 ? (i + 1) / 4.0 : 1.0;
+                if (i == 3) {
+                    Warp::NoteReal(shownAt);
+                }
+                Warp::Params wp;
+                const bool warp = Warp::Make(job.prevView, job.view, phase, shownAt, wp);
+                const HudInputs hud{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
+                                    {job.mvScale[0], job.mvScale[1]}};
                 if (i < 3) {
-                    RestoreHud(cb, s.gen[i], s.real,
-                               HudInputs{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
-                                         {job.mvScale[0], job.mvScale[1]}},
-                               d.texture, 1.0f);
+                    RestoreHud(cb, s.gen[i], s.real, hud, d.texture, 1.0f, warp ? &wp : nullptr);
+                } else if (warp) {
+                    RestoreHud(cb, s.real, s.real, hud, d.texture, 1.0f, &wp);
                 } else {
                     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
                     [blit copyFromTexture:s.real toTexture:d.texture];
                     [blit endEncoding];
-                    Input::Track(d, job.input, "4x");
+                }
+                if (i == 3) {
+                    Input::Track(d, job.input, warp ? "4x warped" : "4x");
+                    if (g_warpEvalLeft.load() > 0) { // consecutive game frames: warped N should be closer to N+1
+                        char base[32];
+                        std::snprintf(base, sizeof(base), "wev%02d", g_warpEvalIndex++);
+                        MetalTrace::SaveTexture(cb, s.real, std::string(base) + "-real");
+                        if (warp) {
+                            MetalTrace::SaveTexture(cb, d.texture, std::string(base) + "-warped");
+                        }
+                        g_warpEvalLeft.fetch_sub(1);
+                    }
                 }
                 NoteShown(d);
                 [d addPresentedHandler:^(id<MTLDrawable> shown) {
@@ -887,6 +922,9 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
         job.interval = n * g_refresh - 0.001;
         job.layer = g_overlay;
         job.input = Input::Current();
+        job.view = Warp::Capture();
+        job.prevView = g_prevView;
+        g_prevView = job.view;
         job.onGameQueue = g_genOnGameQueue.load();
         if (job.onGameQueue) { // after the copies above, in the game's command buffer (before g_event's signal)
             job.generatedOk = Generate(job, s, cb);
@@ -908,6 +946,13 @@ void SetMultiplier(int frames)
         g_reset = true;
         Logger::Info("FrameGen: multiplier " + std::to_string(m));
     }
+}
+
+void WarpEval(int frames)
+{
+    g_warpEvalIndex = 0;
+    g_warpEvalLeft.store(std::max(0, frames));
+    Logger::Info("FrameGen: saving " + std::to_string(frames) + " game frames, warped and not");
 }
 
 void SetGenerateOnGameQueue(bool on)

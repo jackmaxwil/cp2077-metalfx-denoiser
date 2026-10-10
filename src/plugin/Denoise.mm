@@ -507,6 +507,17 @@ bool Projection(float& fovY, float& nearPlane, float& aspect)
     return nearPlane > 0;
 }
 
+bool ViewToClip(float m[16])
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_cam.serial) {
+        return false;
+    }
+    const simd_float4x4 p = simd_mul(g_cam.worldToClip, g_cam.viewToWorld);
+    std::memcpy(m, &p, 64);
+    return true;
+}
+
 bool Camera(float delta[4], float viewToWorld[16], uint64_t& serial)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

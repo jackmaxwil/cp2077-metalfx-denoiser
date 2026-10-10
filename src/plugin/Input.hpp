@@ -13,6 +13,7 @@ void Start();
 // movement since the previous present call.
 struct FrameInput {
     double event = 0, read = 0, present = 0;
+    double x = 0, y = 0; // the game's cumulative mouse movement (AppKit counts) taken up to the present call
 };
 
 // Caps the game's frame rate by waiting right before it reads input for a frame (0 = off). Use instead of the game's
@@ -23,6 +24,10 @@ void SetFrameLimit(float fps);
 void BeginFrame();
 // The current frame's input (BeginFrame), for the presenter that shows the frame.
 FrameInput Current();
+
+// Cumulative mouse movement the game has taken, by the events' own times (host time t, linear between events; the
+// newest when t is past it); false without events in the last eight seconds. latest: the newest event's time.
+bool Counts(double t, double& x, double& y, double* latest = nullptr);
 
 } // namespace Input
 
