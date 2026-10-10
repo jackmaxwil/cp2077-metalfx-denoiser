@@ -103,12 +103,16 @@ install(TARGETS MetalFXDenoiserCore
     LIBRARY DESTINATION red4ext/plugins/MetalFXDenoiser/bin
 )
 
-# Copy config template
-install(FILES ${CMAKE_SOURCE_DIR}/config/config.toml.template
-    DESTINATION red4ext/plugins/MetalFXDenoiser
-    RENAME config.toml
-    OPTIONAL
-)
+# Config template as config.toml, only when there is none (never over the user's settings)
+install(CODE "
+    set(cfg \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/red4ext/plugins/MetalFXDenoiser/config.toml\")
+    if(NOT EXISTS \"\${cfg}\")
+        file(COPY_FILE \"${CMAKE_SOURCE_DIR}/config/config.toml.template\" \"\${cfg}\")
+        message(STATUS \"Installing: \${cfg}\")
+    else()
+        message(STATUS \"Kept: \${cfg}\")
+    endif()
+")
 
 # Tracer self-test (not installed): ./build/trace_selftest
 # (trace_selftest links the same frameworks as the plugin)
