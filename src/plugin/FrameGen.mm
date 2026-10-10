@@ -29,10 +29,14 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #include <simd/simd.h>
+#include <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <cstdlib>
 #include <cmath>
 #include <mutex>
@@ -79,7 +83,7 @@ const bool g_useUi = [] {
     return !(env && *env == '0');
 }();
 
-id<MTLComputePipelineState> g_hud, g_uiCopy, g_uiCopyArray;
+id<MTLComputePipelineState> g_hud, g_uiCopy, g_uiCopyArray, g_down;
 // The UI layer's alpha as the game's HUD composite read it (HudComposite), for the frame g_uiSnapFrame: reading the
 // game's UI layer itself at present time saw it cleared or half redrawn for the next frame (debug paint all green,
 // 62-70% of opaque HUD pixels restored), as the game's resources are not hazard tracked.
@@ -96,7 +100,7 @@ bool Fits(id<MTLTexture> t, id<MTLTexture> like);
 
 bool HudPipelines(id<MTLDevice> dev)
 {
-    if (g_hud && g_uiCopy && g_uiCopyArray) {
+    if (g_hud && g_uiCopy && g_uiCopyArray && g_down) {
         return true;
     }
     NSError* error = nil;
@@ -104,7 +108,8 @@ bool HudPipelines(id<MTLDevice> dev)
     g_hud = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_hud"] error:&error];
     g_uiCopy = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_ui_copy"] error:&error];
     g_uiCopyArray = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_ui_copy_array"] error:&error];
-    if (!g_hud || !g_uiCopy || !g_uiCopyArray) {
+    g_down = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_down"] error:&error];
+    if (!g_hud || !g_uiCopy || !g_uiCopyArray || !g_down) {
         Logger::Error(std::string("FrameGen: HUD kernels failed: ") +
                       (error ? error.localizedDescription.UTF8String : "no library"));
         g_hud = nil;
@@ -113,14 +118,21 @@ bool HudPipelines(id<MTLDevice> dev)
     return true;
 }
 
-// The generated frame (gen) into dst with this frame's HUD (from its real image, cur) wherever the UI layer snapshot has
-// coverage. dst must not be gen: a compute pass writing the interpolator's output right after it lost its writes in the
-// game (MetalFX's output write landed after it); reading it is ordered by hazard tracking. (The interpolator's fence
-// property, waited for here, stopped the game's rendering within a minute in two runs out of two, and never without it;
-// probably as fences only order work within one queue.)
+// What the HUD pass needs of a frame: the UI layer snapshot (output size; a 1x1 zero texture for none), its widened 16x
+// mip (nil for none), the frame's motion and its scale.
+struct HudInputs {
+    id<MTLTexture> ui, low, motion;
+    float mvScale[2];
+};
+
+// The generated frame (gen: output size, or smaller and upscaled bilinear) into dst with this frame's HUD (from its real
+// image, cur) wherever the UI layer snapshot has coverage. dst must not be gen: a compute pass writing the
+// interpolator's output right after it lost its writes in the game (MetalFX's output write landed after it); reading it
+// is ordered by hazard tracking. (The interpolator's fence property, waited for here, stopped the game's rendering
+// within a minute in two runs out of two, and never without it; probably as fences only order work within one queue.)
 id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerated)
 
-void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui, id<MTLTexture> dst,
+void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, const HudInputs& h, id<MTLTexture> dst,
                 float mvFactor)
 {
     MetalTrace::Internal internal;
@@ -128,30 +140,29 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setComputePipelineState:g_hud];
     [ce setTexture:gen atIndex:0];
     [ce setTexture:cur atIndex:1];
-    [ce setTexture:ui atIndex:2];
-    [ce setTexture:g_uiSnapLow ? g_uiSnapLow : ui atIndex:3];
-    [ce setTexture:g_motion ? g_motion : ui atIndex:4];
+    [ce setTexture:h.ui atIndex:2];
+    [ce setTexture:h.low ? h.low : h.ui atIndex:3];
+    [ce setTexture:h.motion ? h.motion : h.ui atIndex:4];
     [ce setTexture:dst atIndex:5];
     // Motion vectors times the game's scale are in render pixels; the output's are larger by the upscale.
-    const float sx = g_motion ? static_cast<float>(gen.width) / g_motion.width : 1.0f;
-    const float sy = g_motion ? static_cast<float>(gen.height) / g_motion.height : 1.0f;
+    const float sx = h.motion ? static_cast<float>(dst.width) / h.motion.width : 1.0f;
+    const float sy = h.motion ? static_cast<float>(dst.height) / h.motion.height : 1.0f;
     struct {
         uint32_t debug, hasLow;
         simd_float2 mvToOut, outToIn;
-    } params = {g_hudDebug.load() ? 1u : 0u, g_uiSnapLow ? 1u : 0u,
-                simd_make_float2(g_motion ? g_mvScale[0] * sx * mvFactor : 0.0f, g_motion ? g_mvScale[1] * sy * mvFactor : 0.0f),
+    } params = {g_hudDebug.load() ? 1u : 0u, h.low ? 1u : 0u,
+                simd_make_float2(h.motion ? h.mvScale[0] * sx * mvFactor : 0.0f, h.motion ? h.mvScale[1] * sy * mvFactor : 0.0f),
                 simd_make_float2(1.0f / sx, 1.0f / sy)};
     [ce setBytes:&params length:sizeof(params) atIndex:0];
-    [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce dispatchThreads:MTLSizeMake(dst.width, dst.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
-    g_lastGen = dst;
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) < 2) {
         char buf[240];
-        std::snprintf(buf, sizeof(buf), "FrameGen: HUD pass encoded (encoder %s, dst %lux%lu usage %lu, ui %lux%lu format %lu)",
-                      class_getName([ce class]), (unsigned long)dst.width, (unsigned long)dst.height,
-                      (unsigned long)dst.usage, (unsigned long)ui.width, (unsigned long)ui.height,
-                      (unsigned long)ui.pixelFormat);
+        std::snprintf(buf, sizeof(buf), "FrameGen: HUD pass encoded (encoder %s, gen %lux%lu, dst %lux%lu usage %lu, ui %lux%lu)",
+                      class_getName([ce class]), (unsigned long)gen.width, (unsigned long)gen.height,
+                      (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.usage,
+                      (unsigned long)h.ui.width, (unsigned long)h.ui.height);
         Logger::Info(buf);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
           Logger::Info(std::string("FrameGen: HUD pass command buffer status ") + std::to_string(done.status) +
@@ -175,7 +186,8 @@ id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTextur
         }
         dst = g_hudOut;
     }
-    RestoreHud(cb, gen, cur, ui, dst, mvFactor);
+    RestoreHud(cb, gen, cur, HudInputs{ui, g_uiSnapLow, g_motion, {g_mvScale[0], g_mvScale[1]}}, dst, mvFactor);
+    g_lastGen = dst;
     return dst;
 }
 
@@ -511,6 +523,322 @@ id<CAMetalDrawable> OverlayDrawable()
     return d;
 }
 
+// Multi-frame generation (multiplier 4): three generated frames per rendered frame, at 1/4, 1/2 and 3/4 of the way from
+// the previous frame to this one. MTLFXFrameInterpolator always makes the midpoint, so they are recursive midpoints:
+// 1/2 from the two frames, 1/4 from the previous frame and 1/2, 3/4 from 1/2 and this frame (the last two with this
+// frame's depth and half its motion), at half the output size. fg_phase on an in-game sequence, at four times the
+// motion: 41.6, 40.4, 41.5 dB against the real frames, about 1-3 dB under full size, for 1.3 ms a call instead of 3.7;
+// scaling the motion vectors instead does not move the phase.
+// The game's command buffer copies its frame, halves it, interpolates and signals g_event; the pacer thread (its own
+// queue, waiting for g_event) upscales each generated frame with the HUD pass straight into an overlay drawable
+// (nextDrawable blocks there, not in the game: the overlay has three) and presents the four a quarter of a frame
+// interval apart (presentDrawable:afterMinimumDuration:). Three slots: frame N's are reused by N+3 once the pacer's work
+// on them completed, else frame N+3 is dropped.
+std::atomic<int> g_mult{[] {
+    const char* env = std::getenv("METALFX_FG_MULT");
+    return env && *env == '4' ? 4 : 2;
+}()};
+
+struct Slot {
+    id<MTLTexture> real, half, gen[3], ui, low, motion; // gen: 1/4, 1/2, 3/4 (half size)
+    std::atomic<bool> free{true};
+};
+Slot g_slots[3];
+id g_mfInterp[3]; // id<MTLFXFrameInterpolator>: 1/2, 1/4, 3/4
+bool g_mfPrev = false; // the previous frame's slot holds its frame
+id<MTLSharedEvent> g_event;
+uint64_t g_eventValue = 0;
+id<MTLTexture> g_zeroUi; // 1x1 R8 zero: the UI snapshot of frames without one
+// A display shows at most one frame per refresh: four frames per rendered frame need it at or under the refresh rate / 4
+// (30 fps at 120 Hz). Faster, only the midpoint is made and shown. Chosen on the smoothed frame interval, with margins
+// so it does not flip back and forth. Each frame is presented whole refreshes after the one before, as many as fit in
+// the frame interval: the four never take longer than a rendered frame.
+double g_refresh = 1.0 / 120, g_dtEma = 0;
+int g_k = 3; // generated frames shown per rendered frame: 3, or 1
+
+// Pacer statistics, logged every 120 jobs: drawable waits, presents, and how many of them the display showed.
+std::atomic<int> g_pacerShown{0}, g_pacerUnshown{0};
+
+struct Job {
+    double queued; // CACurrentMediaTime at enqueue
+    int slot, k;
+    uint64_t value; // g_event's value once the game's command buffer has filled the slot
+    double interval;
+    bool generated, hasUi;
+    float mvScale[2];
+    CAMetalLayer* layer;
+};
+std::mutex g_jobMutex;
+std::condition_variable g_jobCv;
+std::deque<Job> g_jobs;
+id<MTLCommandQueue> g_pacerQueue;
+
+void Pacer()
+{
+    MetalTrace::Internal internal; // its encoders and presents are not the game's
+    int slow = 0, jobs = 0, presents = 0, skipped = 0;
+    double waitSum = 0, waitMax = 0, delaySum = 0;
+    for (;;) {
+        Job job;
+        bool behind;
+        {
+            std::unique_lock<std::mutex> lock(g_jobMutex);
+            g_jobCv.wait(lock, [] { return !g_jobs.empty(); });
+            job = g_jobs.front();
+            g_jobs.pop_front();
+            behind = !g_jobs.empty(); // a newer frame is waiting: show only this one's real frame
+        }
+        delaySum += CACurrentMediaTime() - job.queued;
+        skipped += behind ? 1 : 0;
+        @autoreleasepool {
+            Slot& s = g_slots[job.slot];
+            for (int i = 0; i < 4; ++i) {
+                if (i < 3 && (!job.generated || behind || (job.k == 1 && i != 1))) {
+                    continue;
+                }
+                const double t0 = CACurrentMediaTime();
+                id<CAMetalDrawable> d = [job.layer nextDrawable];
+                const double waited = CACurrentMediaTime() - t0;
+                waitSum += waited;
+                waitMax = std::max(waitMax, waited);
+                slow = !d || waited > 0.25 ? slow + 1 : 0;
+                if (slow >= 3) {
+                    Logger::Error("FrameGen: the pacer waited " + std::to_string(static_cast<int>(waited * 1000)) +
+                                  " ms for a drawable three times in a row: frame generation off");
+                    g_on.store(false);
+                    slow = 0;
+                }
+                if (!d || d.texture.width != s.real.width || d.texture.height != s.real.height) {
+                    continue;
+                }
+                id<MTLCommandBuffer> cb = [g_pacerQueue commandBuffer];
+                [cb encodeWaitForEvent:g_event value:job.value];
+                if (i < 3) {
+                    RestoreHud(cb, s.gen[i], s.real,
+                               HudInputs{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
+                                         {job.mvScale[0], job.mvScale[1]}},
+                               d.texture, 1.0f);
+                } else {
+                    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                    [blit copyFromTexture:s.real toTexture:d.texture];
+                    [blit endEncoding];
+                }
+                NoteShown(d);
+                [d addPresentedHandler:^(id<MTLDrawable> shown) {
+                  (shown.presentedTime > 0 ? g_pacerShown : g_pacerUnshown).fetch_add(1);
+                }];
+                [cb presentDrawable:d afterMinimumDuration:job.interval];
+                [cb commit];
+                ++presents;
+            }
+            id<MTLCommandBuffer> done = [g_pacerQueue commandBuffer]; // after the slot's last read on this queue
+            [done encodeWaitForEvent:g_event value:job.value];
+            const int slot = job.slot;
+            [done addCompletedHandler:^(id<MTLCommandBuffer>) {
+              g_slots[slot].free.store(true);
+            }];
+            [done commit];
+        }
+        if (++jobs == 120) {
+            char buf[300];
+            std::snprintf(buf, sizeof(buf), "FrameGen: pacer, last 120 frames: %d presents (%d shown, %d not shown), "
+                          "%d frames late (generated frames skipped), drawable wait mean %.1f ms max %.1f ms, queue "
+                          "delay mean %.1f ms, interval %.1f ms", presents, g_pacerShown.exchange(0),
+                          g_pacerUnshown.exchange(0), skipped, presents ? waitSum * 1000 / presents : 0.0,
+                          waitMax * 1000, delaySum * 1000 / jobs, job.interval * 1000);
+            Logger::Info(buf);
+            jobs = presents = skipped = 0;
+            waitSum = waitMax = delaySum = 0;
+        }
+    }
+}
+
+void Interpolate(id<MTLFXFrameInterpolator> fi, id<MTLCommandBuffer> cb, id<MTLTexture> prev, id<MTLTexture> cur,
+                 id<MTLTexture> out, float mvFactor, double dt, float aspect)
+{
+    fi.colorTexture = cur;
+    fi.prevColorTexture = prev;
+    fi.depthTexture = g_depth;
+    fi.motionTexture = g_motion;
+    fi.outputTexture = out;
+    fi.motionVectorScaleX = g_mvScale[0] * mvFactor;
+    fi.motionVectorScaleY = g_mvScale[1] * mvFactor;
+    fi.jitterOffsetX = g_passJitter ? g_jitter[0] : 0.0f;
+    fi.jitterOffsetY = g_passJitter ? g_jitter[1] : 0.0f;
+    fi.deltaTime = static_cast<float>(dt);
+    float fov = 60.0f, nearPlane = 0.02f;
+    Denoise::Projection(fov, nearPlane, aspect);
+    fi.nearPlane = nearPlane;
+    fi.farPlane = 20000.0f;
+    fi.fieldOfView = fov;
+    fi.aspectRatio = aspect;
+    fi.depthReversed = g_depthReversed;
+    fi.shouldResetHistory = g_reset;
+    [fi encodeToCommandBuffer:cb];
+}
+
+// Frame generation with multiplier 4 (see above); the caller holds g_mutex. Every frame goes through the pacer.
+void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
+{
+    id<MTLDevice> dev = tex.device;
+    const int si = static_cast<int>(g_frame % 3);
+    Slot& s = g_slots[si];
+    if (!s.free.load()) { // the pacer is two frames behind: drop this one
+        Count(3);
+        g_mfPrev = false;
+        return;
+    }
+    if (!HudPipelines(dev)) {
+        g_on.store(false);
+        return;
+    }
+    if (!g_pacerQueue) {
+        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+        const double hz = mode ? CGDisplayModeGetRefreshRate(mode) : 0;
+        CGDisplayModeRelease(mode);
+        g_refresh = 1.0 / (hz >= 30 ? hz : 120.0);
+        Logger::Info("FrameGen: 4x pacing for a " + std::to_string(static_cast<int>(1 / g_refresh + 0.5)) + " Hz display");
+        g_pacerQueue = [dev newCommandQueue];
+        g_event = [dev newSharedEvent];
+        g_zeroUi = Make(dev, MTLPixelFormatR8Unorm, 1, 1, MTLTextureUsageShaderRead);
+        std::thread(Pacer).detach();
+    }
+    const MTLTextureUsage rw = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+    const NSUInteger hw = tex.width / 2, hh = tex.height / 2;
+    if (!Fits(s.real, tex)) {
+        s.real = Make(dev, tex.pixelFormat, tex.width, tex.height, rw);
+        s.half = Make(dev, tex.pixelFormat, hw, hh, rw);
+        for (auto& g : s.gen) {
+            g = Make(dev, tex.pixelFormat, hw, hh, rw);
+        }
+    }
+    MetalTrace::Internal internal;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:tex toTexture:s.real];
+    [blit endEncoding];
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:g_down];
+    [ce setTexture:s.real atIndex:0];
+    [ce setTexture:s.half atIndex:1];
+    [ce dispatchThreads:MTLSizeMake(hw, hh, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+
+    const Slot& p = g_slots[(g_frame + 2) % 3]; // the previous frame's
+    const bool fresh = g_inputsFrame == g_frame && g_depth;
+    bool generated = false, hasUi = false;
+    if (!fresh) {
+        Count(1);
+    } else if (!g_mfPrev || !Fits(p.half, s.half)) {
+        Count(2);
+    } else {
+        id<MTLFXFrameInterpolator> fi[3];
+        for (int i = 0; i < 3; ++i) {
+            fi[i] = g_mfInterp[i];
+            if (!fi[i] || fi[i].inputWidth != g_depth.width || fi[i].inputHeight != g_depth.height ||
+                fi[i].outputWidth != hw || fi[i].outputHeight != hh ||
+                fi[i].depthTextureFormat != g_depth.pixelFormat || fi[i].motionTextureFormat != g_motion.pixelFormat) {
+                MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+                fd.colorTextureFormat = tex.pixelFormat;
+                fd.outputTextureFormat = tex.pixelFormat;
+                fd.depthTextureFormat = g_depth.pixelFormat;
+                fd.motionTextureFormat = g_motion.pixelFormat;
+                fd.inputWidth = g_depth.width;
+                fd.inputHeight = g_depth.height;
+                fd.outputWidth = hw;
+                fd.outputHeight = hh;
+                fi[i] = g_mfInterp[i] = [fd newFrameInterpolatorWithDevice:dev];
+                g_reset = true;
+                if (i == 0) {
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf), "FrameGen: 4x interpolators %lux%lu -> %lux%lu %s",
+                                  (unsigned long)g_depth.width, (unsigned long)g_depth.height, (unsigned long)hw,
+                                  (unsigned long)hh, fi[i] ? "ready" : "unavailable");
+                    Logger::Info(buf);
+                }
+            }
+        }
+        if (fi[0] && fi[1] && fi[2]) {
+            // This frame's motion and HUD snapshot into the slot: the next frame overwrites the shared ones before the
+            // pacer is done with this one.
+            if (!Fits(s.motion, g_motion)) {
+                s.motion = Make(dev, g_motion.pixelFormat, g_motion.width, g_motion.height, MTLTextureUsageShaderRead);
+            }
+            hasUi = g_useUi && g_uiSnapFrame == g_frame && g_uiSnap;
+            blit = [cb blitCommandEncoder];
+            [blit copyFromTexture:g_motion toTexture:s.motion];
+            if (hasUi) {
+                if (!Fits(s.ui, g_uiSnap)) {
+                    s.ui = Make(dev, g_uiSnap.pixelFormat, g_uiSnap.width, g_uiSnap.height, MTLTextureUsageShaderRead);
+                }
+                [blit copyFromTexture:g_uiSnap toTexture:s.ui];
+                if (g_uiSnapLow) {
+                    if (!Fits(s.low, g_uiSnapLow)) {
+                        s.low = Make(dev, g_uiSnapLow.pixelFormat, g_uiSnapLow.width, g_uiSnapLow.height,
+                                     MTLTextureUsageShaderRead);
+                    }
+                    [blit copyFromTexture:g_uiSnapLow toTexture:s.low];
+                } else {
+                    s.low = nil;
+                }
+            }
+            [blit endEncoding];
+            const float aspect = static_cast<float>(tex.width) / tex.height;
+            Interpolate(fi[0], cb, p.half, s.half, s.gen[1], 1.0f, dt, aspect);
+            if (g_k == 3) {
+                Interpolate(fi[1], cb, p.half, s.gen[1], s.gen[0], 0.5f, dt / 2, aspect);
+                Interpolate(fi[2], cb, s.gen[1], s.half, s.gen[2], 0.5f, dt / 2, aspect);
+            }
+            g_reset = false;
+            generated = true;
+            Count(4);
+            g_generated.fetch_add(g_k);
+        }
+    }
+    if (!fresh) {
+        g_reset = true;
+    }
+    const int k = g_k;
+    // Whole refreshes per shown frame (presentDrawable:afterMinimumDuration: waits for the next refresh after it).
+    const double n = std::max(1.0, std::floor(g_dtEma / (k + 1) / g_refresh + 0.05));
+    g_dtEma = g_dtEma > 0 ? 0.9 * g_dtEma + 0.1 * dt : dt;
+    // Margins: a game held at 30 fps on a 120 Hz display (33.3 ms frames, dynamic_scale_fps = 30) stays at three.
+    if (g_k == 3 && g_dtEma < 4 * g_refresh * 0.92) {
+        g_k = 1;
+    } else if (g_k == 1 && g_dtEma > 4 * g_refresh * 0.99) {
+        g_k = 3;
+        g_reset = true; // the 1/4 and 3/4 interpolators skipped frames
+    }
+    if (k != g_k) {
+        Logger::Info(std::string("FrameGen: 4x now shows ") + (g_k == 3 ? "three generated frames" : "one generated frame") +
+                     " per frame (frame interval " + std::to_string(g_dtEma * 1000).substr(0, 4) + " ms)");
+    }
+    [cb encodeSignalEvent:g_event value:++g_eventValue];
+    s.free.store(false);
+    {
+        std::lock_guard<std::mutex> lock(g_jobMutex);
+        g_jobs.push_back(Job{CACurrentMediaTime(), si, k, g_eventValue, generated ? n * g_refresh - 0.001 : 0.0, generated, hasUi,
+                             {g_mvScale[0], g_mvScale[1]}, g_overlay});
+    }
+    g_jobCv.notify_one();
+    g_mfPrev = true;
+}
+
+void SetMultiplier(int frames)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const int m = frames == 4 ? 4 : 2;
+    if (g_mult.exchange(m) != m) {
+        g_havePrev = g_mfPrev = false;
+        g_reset = true;
+        Logger::Info("FrameGen: multiplier " + std::to_string(m));
+    }
+}
+
+int Multiplier()
+{
+    return g_mult.load();
+}
+
 bool Present(id commandBuffer, id drawable, const std::function<void(id)>& present,
              const std::function<void(id, double)>& presentAfter)
 {
@@ -587,6 +915,10 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         const double now = CACurrentMediaTime();
         const double dt = g_lastPresent > 0 ? std::min(0.1, now - g_lastPresent) : 1.0 / 30.0;
         g_lastPresent = now;
+        if (g_mult.load() == 4) {
+            PresentMulti(cb, tex, dt);
+            return true; // the pacer presents; the game's drawable goes back to its pool
+        }
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit copyFromTexture:tex toTexture:g_cur];
         [blit endEncoding];

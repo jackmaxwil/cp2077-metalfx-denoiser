@@ -124,6 +124,9 @@ bool Initialize()
     if (const char* env = std::getenv("METALFX_FRAMEGEN"); !env || !*env) {
         FrameGen::SetEnabled(config.frameGeneration);
     }
+    if (const char* env = std::getenv("METALFX_FG_MULT"); !env || !*env) {
+        FrameGen::SetMultiplier(config.frameGenerationMultiplier);
+    }
     s_noisy.store(config.debug.noisyLighting);
     const char* lodEnv = std::getenv("METALFX_LODBIAS_ADD");
     MetalTrace::SetSamplerLodBias(lodEnv && *lodEnv ? std::strtof(lodEnv, nullptr) : config.textureLodBias);

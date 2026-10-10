@@ -7,6 +7,10 @@ namespace FrameGen {
 
 void SetEnabled(bool on);
 bool Enabled();
+// Displayed frames per rendered frame: 2 (one generated), or 4 (three generated, at half size; presented by a pacer
+// thread). Config frame_generation_multiplier, request "fgmult <2|4>", METALFX_FG_MULT=4.
+void SetMultiplier(int frames);
+int Multiplier();
 // Generated frames presented since start.
 unsigned long long Generated();
 // Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate

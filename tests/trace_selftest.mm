@@ -302,7 +302,9 @@ kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p
             FrameGen::SetHudDebug(true);
             FrameGen::SetEnabled(true);
             const auto before = FrameGen::Generated();
-            for (int frame = 0; frame < 12; ++frame) {
+            auto runFrames = [&](int frames, double interval) {
+            for (int frame = 0; frame < frames; ++frame) {
+                [NSThread sleepForTimeInterval:interval];
                 @autoreleasepool {
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
                     MTLRenderPassDescriptor* uiPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -329,8 +331,8 @@ kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p
                     [cb waitUntilCompleted];
                 }
             }
-            FrameGen::SetEnabled(false);
-            FrameGen::SetHudDebug(false);
+            };
+            runFrames(12, 0);
             if (FrameGen::Generated() - before < 8) {
                 std::fprintf(stderr, "generated %llu\n", FrameGen::Generated() - before);
                 return Fail("frame generation produced no frames");
@@ -356,6 +358,18 @@ kernel void hud_comp(texture2d<float, access::write> out [[texture(0)]], uint2 p
             std::fprintf(stderr, "HUD restore: %d of %d pixels restored (HUD layer covers all)\n", magenta, 64 * 32);
             if (magenta < 64 * 32 * 9 / 10) {
                 return Fail("HUD restore does not see the HUD layer");
+            }
+            // Multiplier 4: three generated frames per frame at 25 fps, presented by the pacer thread.
+            FrameGen::SetMultiplier(4);
+            const auto before4 = FrameGen::Generated();
+            runFrames(12, 0.04);
+            [NSThread sleepForTimeInterval:0.5]; // the pacer's presents
+            FrameGen::SetMultiplier(2);
+            FrameGen::SetEnabled(false);
+            FrameGen::SetHudDebug(false);
+            std::fprintf(stderr, "frame generation 4x: %llu generated in 12 frames\n", FrameGen::Generated() - before4);
+            if (FrameGen::Generated() - before4 < 24) {
+                return Fail("4x frame generation produced too few frames");
             }
         }
 

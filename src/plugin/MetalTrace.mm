@@ -953,6 +953,8 @@ void PollRequests(uint64_t frame)
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
         FrameGen::Evaluate(std::atoi(name.c_str()));
+    } else if (kind == "fgmult") {
+        FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
         FrameGen::SaveSequence(std::atoi(name.c_str()));
     } else if (kind == "denoiseprepass") {
@@ -1832,6 +1834,10 @@ void H_cbCommit(id self, SEL sel)
 
 void H_cbPresent(id self, SEL sel, id drawable)
 {
+    if (t_internal) { // frame generation's pacer (FrameGen.mm): not a frame of the game's
+        ORIG(o_cbPresent, V1, self)(self, sel, drawable);
+        return;
+    }
     OnPresent(true);
     // Frame generation presents a generated frame and then the game's (FrameGen.mm), through the original methods.
     if (FrameGen::Present(
@@ -1846,13 +1852,17 @@ void H_cbPresent(id self, SEL sel, id drawable)
 
 void H_cbPresentAt(id self, SEL sel, id drawable, CFTimeInterval t)
 {
-    OnPresent(true);
+    if (!t_internal) {
+        OnPresent(true);
+    }
     ORIG(o_cbPresentAt, V1T, self)(self, sel, drawable, t);
 }
 
 void H_cbPresentAfter(id self, SEL sel, id drawable, CFTimeInterval t)
 {
-    OnPresent(true);
+    if (!t_internal) {
+        OnPresent(true);
+    }
     ORIG(o_cbPresentAfter, V1T, self)(self, sel, drawable, t);
 }
 

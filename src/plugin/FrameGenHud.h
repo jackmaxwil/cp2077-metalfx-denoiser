@@ -33,8 +33,17 @@ kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], textur
     dst.write(float4(b), p);
 }
 struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; };
-// The generated frame (gen) into dst, with the real frame's (cur) pixels wherever the HUD or its copies may be.
-kernel void fg_hud(texture2d<float, access::read> gen [[texture(0)]],
+// Half size (each texel the mean of 2x2: one bilinear sample at their shared corner), for interpolating at half output.
+kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
+                    uint2 p [[thread_position_in_grid]])
+{
+    constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
+    if (p.x < dst.get_width() && p.y < dst.get_height())
+        dst.write(src.sample(bilinear, (float2(p) + 0.5) / float2(dst.get_width(), dst.get_height())), p);
+}
+// The generated frame (gen, output size or smaller: sampled bilinear) into dst, with the real frame's (cur) pixels
+// wherever the HUD or its copies may be.
+kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
                    texture2d<float, access::read> cur [[texture(1)]],
                    texture2d<float, access::read> ui [[texture(2)]],
                    texture2d<float, access::read> low [[texture(3)]],
@@ -74,6 +83,10 @@ kernel void fg_hud(texture2d<float, access::read> gen [[texture(0)]],
     }
     // Any coverage takes the real pixel whole: a partial blend keeps part of the interpolated (dragged) HUD.
     if (h.debug != 0u) dst.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p);
-    else dst.write(a > 0.0 ? cur.read(p) : gen.read(p), p);
+    else if (a > 0.0) dst.write(cur.read(p), p);
+    else {
+        constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
+        dst.write(gen.sample(bilinear, (float2(p) + 0.5) / float2(dst.get_width(), dst.get_height())), p);
+    }
 }
 )";

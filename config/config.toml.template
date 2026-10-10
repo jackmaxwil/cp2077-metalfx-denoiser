@@ -29,6 +29,9 @@ ultra_scale = 3.0
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false
+# Displayed frames per rendered frame with frame generation: 2 (one generated frame), or 4 (three, generated at half
+# size: about the same GPU cost as 2, softer in-between frames, the real frame shown a little later).
+frame_generation_multiplier = 2
 
 [debug]
 # Show the noisy lighting (NRD off, no denoiser): for comparisons only.

@@ -49,6 +49,7 @@ struct Settings {
     bool enabled = true;
     bool ultraPerformance = false; // MetalFX at 3x (the engine's hidden Ultra Performance scale)
     bool frameGeneration = false;  // MetalFX frame interpolation (FrameGen.mm)
+    int frameGenerationMultiplier = 2; // displayed frames per rendered frame: 2 or 4
     Quality quality = Quality::Quality;
     float ultraScale = 3.0f;      // render scale of ultra_performance (2.0-3.0; the game's is 3.0)
     float textureLodBias = 0.0f;  // added to the game's sampler LOD bias at startup (-0.585 matches 3x)
