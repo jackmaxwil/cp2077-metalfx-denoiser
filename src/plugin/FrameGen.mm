@@ -22,6 +22,7 @@
 
 #include "FrameGen.hpp"
 #include "FrameGenHud.h"
+#include "Input.hpp"
 #include "Denoise.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
@@ -529,22 +530,25 @@ id<CAMetalDrawable> OverlayDrawable()
 // frame's depth and half its motion), at half the output size. fg_phase on an in-game sequence, at four times the
 // motion: 41.6, 40.4, 41.5 dB against the real frames, about 1-3 dB under full size, for 1.3 ms a call instead of 3.7;
 // scaling the motion vectors instead does not move the phase.
-// The game's command buffer copies its frame, halves it, interpolates and signals g_event; the pacer thread (its own
-// queue, waiting for g_event) upscales each generated frame with the HUD pass straight into an overlay drawable
-// (nextDrawable blocks there, not in the game: the overlay has three) and presents the four a quarter of a frame
-// interval apart (presentDrawable:afterMinimumDuration:). Three slots: frame N's are reused by N+3 once the pacer's work
-// on them completed, else frame N+3 is dropped.
+// The game's command buffer only copies its frame, depth, motion and HUD snapshot into a slot and signals g_event (the
+// rest no longer lengthens the game's frame). The pacer thread, on its own queue, waits for that, halves the frame,
+// interpolates (overlapping the game's next frame on the GPU), and presents each generated frame (upscaled by the HUD
+// pass straight into an overlay drawable) and then the game's: the first as soon as it is ready, the others whole
+// refreshes apart. Each frame starts as soon as it is ready, not after the previous one's last present: chaining them
+// (presentDrawable:afterMinimumDuration: from the previous frame's) ran a frame behind at 30 fps (queue delay 25-35 ms).
+// When a newer frame is ready, the rest of the older one's presents are skipped (its interpolations still run: the
+// interpolators are fed in order). Three slots: frame N's are reused by N+3 once the pacer is done with them, else
+// frame N+3 is dropped.
 std::atomic<int> g_mult{[] {
     const char* env = std::getenv("METALFX_FG_MULT");
     return env && *env == '4' ? 4 : 2;
 }()};
 
 struct Slot {
-    id<MTLTexture> real, half, gen[3], ui, low, motion; // gen: 1/4, 1/2, 3/4 (half size)
+    id<MTLTexture> real, half, gen[3], ui, low, motion, depth; // gen: 1/4, 1/2, 3/4 (half size)
     std::atomic<bool> free{true};
 };
 Slot g_slots[3];
-id g_mfInterp[3]; // id<MTLFXFrameInterpolator>: 1/2, 1/4, 3/4
 bool g_mfPrev = false; // the previous frame's slot holds its frame
 id<MTLSharedEvent> g_event;
 uint64_t g_eventValue = 0;
@@ -553,9 +557,8 @@ id<MTLTexture> g_zeroUi; // 1x1 R8 zero: the UI snapshot of frames without one
 // (30 fps at 120 Hz). Faster, only the midpoint is shown. Chosen on the frame interval smoothed over about a second, with
 // wide margins and at least 3 s between changes: with path tracing the frame interval wanders across 30-35 ms, and the
 // earlier 8% margins flipped it several times a second (each flip a change of cadence). All three interpolations always
-// run, so a change never resets them (a reset interpolator returns its input: a repeated frame). Each frame is presented
-// whole refreshes after the one before, as many as fit in the frame interval. For 120 Hz, cap the game at 30 fps (its
-// MaximumFPS setting): the four then fill the frame interval exactly.
+// run, so a change never resets them (a reset interpolator returns its input: a repeated frame). For 120 Hz, cap the
+// game just under 30 fps (its MaximumFPS setting, 29): the four then fit in the frame interval with a little slack.
 double g_refresh = 1.0 / 120, g_dtEma = 0, g_kChanged = 0;
 int g_k = 3; // generated frames shown per rendered frame: 3, or 1
 
@@ -564,17 +567,105 @@ std::atomic<int> g_pacerShown{0}, g_pacerUnshown{0};
 
 struct Job {
     double queued; // CACurrentMediaTime at enqueue
-    int slot, k;
+    int slot, prevSlot, k;
     uint64_t value; // g_event's value once the game's command buffer has filled the slot
-    double interval;
-    bool generated, hasUi;
-    float mvScale[2];
+    bool interpolate, reset, hasUi, reversed, onGameQueue, generatedOk;
+    float mvScale[2], jitter[2], fov, nearPlane, aspect;
+    double dt, interval;
     CAMetalLayer* layer;
+    Input::FrameInput input;
 };
 std::mutex g_jobMutex;
 std::condition_variable g_jobCv;
 std::deque<Job> g_jobs;
 id<MTLCommandQueue> g_pacerQueue;
+id g_mfInterp[3]; // id<MTLFXFrameInterpolator>: 1/2, 1/4, 3/4 (pacer thread only)
+
+void Interpolate(id<MTLFXFrameInterpolator> fi, id<MTLCommandBuffer> cb, const Job& job, const Slot& s,
+                 id<MTLTexture> prev, id<MTLTexture> cur, id<MTLTexture> out, float mvFactor, double dt)
+{
+    fi.colorTexture = cur;
+    fi.prevColorTexture = prev;
+    fi.depthTexture = s.depth;
+    fi.motionTexture = s.motion;
+    fi.outputTexture = out;
+    fi.motionVectorScaleX = job.mvScale[0] * mvFactor;
+    fi.motionVectorScaleY = job.mvScale[1] * mvFactor;
+    fi.jitterOffsetX = job.jitter[0];
+    fi.jitterOffsetY = job.jitter[1];
+    fi.deltaTime = static_cast<float>(dt);
+    fi.nearPlane = job.nearPlane;
+    fi.farPlane = 20000.0f;
+    fi.fieldOfView = job.fov;
+    fi.aspectRatio = job.aspect;
+    fi.depthReversed = job.reversed;
+    fi.shouldResetHistory = job.reset;
+    [fi encodeToCommandBuffer:cb];
+}
+
+// Where the halving and interpolations run: the pacer's queue (overlaps the game's next frame when the GPU has idle
+// time), or the game's command buffer (request "fgqueue game|own").
+std::atomic<bool> g_genOnGameQueue{false};
+
+// Halves the slot's frame and, when the job interpolates, makes its three generated frames, on cb (the pacer's queue:
+// nil, made here; or the game's command buffer). False when the interpolators are unavailable.
+bool Generate(const Job& job, Slot& s, id<MTLCommandBuffer> onto = nil)
+{
+    id<MTLCommandBuffer> cb = onto;
+    if (!cb) {
+        cb = [g_pacerQueue commandBuffer];
+        [cb encodeWaitForEvent:g_event value:job.value];
+    }
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:g_down];
+    [ce setTexture:s.real atIndex:0];
+    [ce setTexture:s.half atIndex:1];
+    [ce dispatchThreads:MTLSizeMake(s.half.width, s.half.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+    bool ok = true;
+    if (job.interpolate) {
+        const Slot& p = g_slots[job.prevSlot];
+        id<MTLFXFrameInterpolator> fi[3];
+        bool created = false;
+        for (int i = 0; i < 3; ++i) {
+            fi[i] = g_mfInterp[i];
+            if (!fi[i] || fi[i].inputWidth != s.depth.width || fi[i].inputHeight != s.depth.height ||
+                fi[i].outputWidth != s.half.width || fi[i].outputHeight != s.half.height ||
+                fi[i].depthTextureFormat != s.depth.pixelFormat || fi[i].motionTextureFormat != s.motion.pixelFormat) {
+                MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+                fd.colorTextureFormat = s.real.pixelFormat;
+                fd.outputTextureFormat = s.real.pixelFormat;
+                fd.depthTextureFormat = s.depth.pixelFormat;
+                fd.motionTextureFormat = s.motion.pixelFormat;
+                fd.inputWidth = s.depth.width;
+                fd.inputHeight = s.depth.height;
+                fd.outputWidth = s.half.width;
+                fd.outputHeight = s.half.height;
+                fi[i] = g_mfInterp[i] = [fd newFrameInterpolatorWithDevice:cb.device];
+                created = true;
+                if (i == 0) {
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf), "FrameGen: 4x interpolators %lux%lu -> %lux%lu %s",
+                                  (unsigned long)s.depth.width, (unsigned long)s.depth.height,
+                                  (unsigned long)s.half.width, (unsigned long)s.half.height, fi[i] ? "ready" : "unavailable");
+                    Logger::Info(buf);
+                }
+            }
+        }
+        ok = fi[0] && fi[1] && fi[2];
+        if (ok) {
+            Job j = job;
+            j.reset = job.reset || created;
+            Interpolate(fi[0], cb, j, s, p.half, s.half, s.gen[1], 1.0f, job.dt);
+            Interpolate(fi[1], cb, j, s, p.half, s.gen[1], s.gen[0], 0.5f, job.dt / 2);
+            Interpolate(fi[2], cb, j, s, s.gen[1], s.half, s.gen[2], 0.5f, job.dt / 2);
+        }
+    }
+    if (!onto) {
+        [cb commit];
+    }
+    return ok;
+}
 
 void Pacer()
 {
@@ -583,21 +674,29 @@ void Pacer()
     double waitSum = 0, waitMax = 0, delaySum = 0;
     for (;;) {
         Job job;
-        bool behind;
         {
             std::unique_lock<std::mutex> lock(g_jobMutex);
             g_jobCv.wait(lock, [] { return !g_jobs.empty(); });
             job = g_jobs.front();
             g_jobs.pop_front();
-            behind = !g_jobs.empty(); // a newer frame is waiting: show only this one's real frame
         }
-        delaySum += CACurrentMediaTime() - job.queued;
-        skipped += behind ? 1 : 0;
+        auto newer = [] { // a newer frame is done on the GPU (queued is not enough: the game runs a frame ahead)
+            std::lock_guard<std::mutex> lock(g_jobMutex);
+            return !g_jobs.empty() && g_event.signaledValue >= g_jobs.front().value;
+        };
         @autoreleasepool {
             Slot& s = g_slots[job.slot];
+            const bool generated = (job.generatedOk || (!job.onGameQueue && Generate(job, s))) && job.interpolate;
+            [g_event waitUntilSignaledValue:job.value timeoutMS:1000]; // the game's frame is done: start showing it
+            delaySum += CACurrentMediaTime() - job.queued;
+            bool first = true, late = false;
             for (int i = 0; i < 4; ++i) {
-                if (i < 3 && (!job.generated || behind || (job.k == 1 && i != 1))) {
+                if (i < 3 && (!generated || (job.k == 1 && i != 1))) {
                     continue;
+                }
+                if (newer()) { // a newer frame is ready to show: drop the rest of this one
+                    late = true;
+                    break;
                 }
                 const double t0 = CACurrentMediaTime();
                 id<CAMetalDrawable> d = [job.layer nextDrawable];
@@ -615,7 +714,6 @@ void Pacer()
                     continue;
                 }
                 id<MTLCommandBuffer> cb = [g_pacerQueue commandBuffer];
-                [cb encodeWaitForEvent:g_event value:job.value];
                 if (i < 3) {
                     RestoreHud(cb, s.gen[i], s.real,
                                HudInputs{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
@@ -625,17 +723,23 @@ void Pacer()
                     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
                     [blit copyFromTexture:s.real toTexture:d.texture];
                     [blit endEncoding];
+                    Input::Track(d, job.input, "4x");
                 }
                 NoteShown(d);
                 [d addPresentedHandler:^(id<MTLDrawable> shown) {
                   (shown.presentedTime > 0 ? g_pacerShown : g_pacerUnshown).fetch_add(1);
                 }];
-                [cb presentDrawable:d afterMinimumDuration:job.interval];
+                if (first) {
+                    [cb presentDrawable:d];
+                } else {
+                    [cb presentDrawable:d afterMinimumDuration:job.interval];
+                }
                 [cb commit];
+                first = false;
                 ++presents;
             }
+            skipped += late ? 1 : 0;
             id<MTLCommandBuffer> done = [g_pacerQueue commandBuffer]; // after the slot's last read on this queue
-            [done encodeWaitForEvent:g_event value:job.value];
             const int slot = job.slot;
             [done addCompletedHandler:^(id<MTLCommandBuffer>) {
               g_slots[slot].free.store(true);
@@ -645,8 +749,8 @@ void Pacer()
         if (++jobs == 120) {
             char buf[300];
             std::snprintf(buf, sizeof(buf), "FrameGen: pacer, last 120 frames: %d presents (%d shown, %d not shown), "
-                          "%d frames late (generated frames skipped), drawable wait mean %.1f ms max %.1f ms, queue "
-                          "delay mean %.1f ms, interval %.1f ms", presents, g_pacerShown.exchange(0),
+                          "%d frames cut short by a newer one, drawable wait mean %.1f ms max %.1f ms, present call to "
+                          "frame ready mean %.1f ms, interval %.1f ms", presents, g_pacerShown.exchange(0),
                           g_pacerUnshown.exchange(0), skipped, presents ? waitSum * 1000 / presents : 0.0,
                           waitMax * 1000, delaySum * 1000 / jobs, job.interval * 1000);
             Logger::Info(buf);
@@ -656,34 +760,16 @@ void Pacer()
     }
 }
 
-void Interpolate(id<MTLFXFrameInterpolator> fi, id<MTLCommandBuffer> cb, id<MTLTexture> prev, id<MTLTexture> cur,
-                 id<MTLTexture> out, float mvFactor, double dt, float aspect)
-{
-    fi.colorTexture = cur;
-    fi.prevColorTexture = prev;
-    fi.depthTexture = g_depth;
-    fi.motionTexture = g_motion;
-    fi.outputTexture = out;
-    fi.motionVectorScaleX = g_mvScale[0] * mvFactor;
-    fi.motionVectorScaleY = g_mvScale[1] * mvFactor;
-    fi.jitterOffsetX = g_passJitter ? g_jitter[0] : 0.0f;
-    fi.jitterOffsetY = g_passJitter ? g_jitter[1] : 0.0f;
-    fi.deltaTime = static_cast<float>(dt);
-    float fov = 60.0f, nearPlane = 0.02f;
-    Denoise::Projection(fov, nearPlane, aspect);
-    fi.nearPlane = nearPlane;
-    fi.farPlane = 20000.0f;
-    fi.fieldOfView = fov;
-    fi.aspectRatio = aspect;
-    fi.depthReversed = g_depthReversed;
-    fi.shouldResetHistory = g_reset;
-    [fi encodeToCommandBuffer:cb];
-}
-
 // Frame generation with multiplier 4 (see above); the caller holds g_mutex. Every frame goes through the pacer.
+// Back-pressure: the game's present call for frame N waits until frame N-1's GPU work is done (one frame queued). The
+// game's own drawables never block it here (they are not presented), so without this it ran up to three frames ahead
+// of the GPU: in game (path tracing) frames waited about 130 ms from ready to shown and most were cut short.
 void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
 {
     id<MTLDevice> dev = tex.device;
+    if (g_event && g_eventValue > 0) {
+        [g_event waitUntilSignaledValue:g_eventValue timeoutMS:250];
+    }
     const int si = static_cast<int>(g_frame % 3);
     Slot& s = g_slots[si];
     if (!s.free.load()) { // the pacer is two frames behind: drop this one
@@ -715,89 +801,50 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
             g = Make(dev, tex.pixelFormat, hw, hh, rw);
         }
     }
+    const int pi = static_cast<int>((g_frame + 2) % 3);
+    const bool fresh = g_inputsFrame == g_frame && g_depth;
+    bool interpolate = false, hasUi = false;
     MetalTrace::Internal internal;
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:tex toTexture:s.real];
-    [blit endEncoding];
-    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:g_down];
-    [ce setTexture:s.real atIndex:0];
-    [ce setTexture:s.half atIndex:1];
-    [ce dispatchThreads:MTLSizeMake(hw, hh, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    [ce endEncoding];
-
-    const Slot& p = g_slots[(g_frame + 2) % 3]; // the previous frame's
-    const bool fresh = g_inputsFrame == g_frame && g_depth;
-    bool generated = false, hasUi = false;
     if (!fresh) {
         Count(1);
-    } else if (!g_mfPrev || !Fits(p.half, s.half)) {
+    } else if (!g_mfPrev || !Fits(g_slots[pi].real, s.real)) {
         Count(2);
     } else {
-        id<MTLFXFrameInterpolator> fi[3];
-        for (int i = 0; i < 3; ++i) {
-            fi[i] = g_mfInterp[i];
-            if (!fi[i] || fi[i].inputWidth != g_depth.width || fi[i].inputHeight != g_depth.height ||
-                fi[i].outputWidth != hw || fi[i].outputHeight != hh ||
-                fi[i].depthTextureFormat != g_depth.pixelFormat || fi[i].motionTextureFormat != g_motion.pixelFormat) {
-                MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
-                fd.colorTextureFormat = tex.pixelFormat;
-                fd.outputTextureFormat = tex.pixelFormat;
-                fd.depthTextureFormat = g_depth.pixelFormat;
-                fd.motionTextureFormat = g_motion.pixelFormat;
-                fd.inputWidth = g_depth.width;
-                fd.inputHeight = g_depth.height;
-                fd.outputWidth = hw;
-                fd.outputHeight = hh;
-                fi[i] = g_mfInterp[i] = [fd newFrameInterpolatorWithDevice:dev];
-                g_reset = true;
-                if (i == 0) {
-                    char buf[200];
-                    std::snprintf(buf, sizeof(buf), "FrameGen: 4x interpolators %lux%lu -> %lux%lu %s",
-                                  (unsigned long)g_depth.width, (unsigned long)g_depth.height, (unsigned long)hw,
-                                  (unsigned long)hh, fi[i] ? "ready" : "unavailable");
-                    Logger::Info(buf);
+        // This frame's depth, motion and HUD snapshot into the slot: the game's next frame overwrites the shared ones
+        // before the pacer is done with this one.
+        if (!Fits(s.depth, g_depth)) {
+            s.depth = Make(dev, g_depth.pixelFormat, g_depth.width, g_depth.height, MTLTextureUsageShaderRead);
+        }
+        if (!Fits(s.motion, g_motion)) {
+            s.motion = Make(dev, g_motion.pixelFormat, g_motion.width, g_motion.height, MTLTextureUsageShaderRead);
+        }
+        [blit copyFromTexture:g_depth toTexture:s.depth];
+        [blit copyFromTexture:g_motion toTexture:s.motion];
+        hasUi = g_useUi && g_uiSnapFrame == g_frame && g_uiSnap;
+        if (hasUi) {
+            if (!Fits(s.ui, g_uiSnap)) {
+                s.ui = Make(dev, g_uiSnap.pixelFormat, g_uiSnap.width, g_uiSnap.height, MTLTextureUsageShaderRead);
+            }
+            [blit copyFromTexture:g_uiSnap toTexture:s.ui];
+            if (g_uiSnapLow) {
+                if (!Fits(s.low, g_uiSnapLow)) {
+                    s.low = Make(dev, g_uiSnapLow.pixelFormat, g_uiSnapLow.width, g_uiSnapLow.height,
+                                 MTLTextureUsageShaderRead);
                 }
+                [blit copyFromTexture:g_uiSnapLow toTexture:s.low];
+            } else {
+                s.low = nil;
             }
         }
-        if (fi[0] && fi[1] && fi[2]) {
-            // This frame's motion and HUD snapshot into the slot: the next frame overwrites the shared ones before the
-            // pacer is done with this one.
-            if (!Fits(s.motion, g_motion)) {
-                s.motion = Make(dev, g_motion.pixelFormat, g_motion.width, g_motion.height, MTLTextureUsageShaderRead);
-            }
-            hasUi = g_useUi && g_uiSnapFrame == g_frame && g_uiSnap;
-            blit = [cb blitCommandEncoder];
-            [blit copyFromTexture:g_motion toTexture:s.motion];
-            if (hasUi) {
-                if (!Fits(s.ui, g_uiSnap)) {
-                    s.ui = Make(dev, g_uiSnap.pixelFormat, g_uiSnap.width, g_uiSnap.height, MTLTextureUsageShaderRead);
-                }
-                [blit copyFromTexture:g_uiSnap toTexture:s.ui];
-                if (g_uiSnapLow) {
-                    if (!Fits(s.low, g_uiSnapLow)) {
-                        s.low = Make(dev, g_uiSnapLow.pixelFormat, g_uiSnapLow.width, g_uiSnapLow.height,
-                                     MTLTextureUsageShaderRead);
-                    }
-                    [blit copyFromTexture:g_uiSnapLow toTexture:s.low];
-                } else {
-                    s.low = nil;
-                }
-            }
-            [blit endEncoding];
-            const float aspect = static_cast<float>(tex.width) / tex.height;
-            Interpolate(fi[0], cb, p.half, s.half, s.gen[1], 1.0f, dt, aspect);
-            Interpolate(fi[1], cb, p.half, s.gen[1], s.gen[0], 0.5f, dt / 2, aspect);
-            Interpolate(fi[2], cb, s.gen[1], s.half, s.gen[2], 0.5f, dt / 2, aspect);
-            g_reset = false;
-            generated = true;
-            Count(4);
-            g_generated.fetch_add(g_k);
-        }
+        interpolate = true;
+        Count(4);
+        g_generated.fetch_add(g_k);
     }
-    if (!fresh) {
-        g_reset = true;
-    }
+    [blit endEncoding];
+    const bool reset = g_reset;
+    g_reset = !interpolate; // after a frame the interpolators skipped, they start over
     const int k = g_k;
     // Whole refreshes per shown frame (presentDrawable:afterMinimumDuration: waits for the next refresh after it).
     const double n = std::max(1.0, std::floor(g_dtEma / (k + 1) / g_refresh + 0.05));
@@ -815,12 +862,38 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
         Logger::Info(std::string("FrameGen: 4x now shows ") + (g_k == 3 ? "three generated frames" : "one generated frame") +
                      " per frame (frame interval " + std::to_string(g_dtEma * 1000).substr(0, 4) + " ms)");
     }
-    [cb encodeSignalEvent:g_event value:++g_eventValue];
+    float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
+    Denoise::Projection(fov, nearPlane, aspect);
     s.free.store(false);
     {
+        Job job{};
+        job.queued = now;
+        job.slot = si;
+        job.prevSlot = pi;
+        job.k = k;
+        job.value = g_eventValue + 1;
+        job.interpolate = interpolate;
+        job.reset = reset;
+        job.hasUi = hasUi;
+        job.reversed = g_depthReversed;
+        job.mvScale[0] = g_mvScale[0];
+        job.mvScale[1] = g_mvScale[1];
+        job.jitter[0] = g_passJitter ? g_jitter[0] : 0.0f;
+        job.jitter[1] = g_passJitter ? g_jitter[1] : 0.0f;
+        job.fov = fov;
+        job.nearPlane = nearPlane;
+        job.aspect = aspect;
+        job.dt = dt;
+        job.interval = n * g_refresh - 0.001;
+        job.layer = g_overlay;
+        job.input = Input::Current();
+        job.onGameQueue = g_genOnGameQueue.load();
+        if (job.onGameQueue) { // after the copies above, in the game's command buffer (before g_event's signal)
+            job.generatedOk = Generate(job, s, cb);
+        }
+        [cb encodeSignalEvent:g_event value:++g_eventValue];
         std::lock_guard<std::mutex> lock(g_jobMutex);
-        g_jobs.push_back(Job{CACurrentMediaTime(), si, k, g_eventValue, generated ? n * g_refresh - 0.001 : 0.0, generated, hasUi,
-                             {g_mvScale[0], g_mvScale[1]}, g_overlay});
+        g_jobs.push_back(job);
     }
     g_jobCv.notify_one();
     g_mfPrev = true;
@@ -835,6 +908,12 @@ void SetMultiplier(int frames)
         g_reset = true;
         Logger::Info("FrameGen: multiplier " + std::to_string(m));
     }
+}
+
+void SetGenerateOnGameQueue(bool on)
+{
+    g_genOnGameQueue.store(on);
+    Logger::Info(std::string("FrameGen: 4x generation on ") + (on ? "the game's command buffer" : "the pacer's queue"));
 }
 
 int Multiplier()
@@ -853,10 +932,11 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         char buf[300];
         std::snprintf(buf, sizeof(buf),
                       "FrameGen: game presents %lux%lu format %lu usage %lu framebufferOnly %d, layer drawables %lu, "
-                      "display sync %d, layer %.0fx%.0f",
+                      "display sync %d, layer %.0fx%.0f, EDR %d",
                       (unsigned long)tex.width, (unsigned long)tex.height, (unsigned long)tex.pixelFormat,
                       (unsigned long)tex.usage, layer.framebufferOnly ? 1 : 0, (unsigned long)layer.maximumDrawableCount,
-                      layer.displaySyncEnabled ? 1 : 0, layer.drawableSize.width, layer.drawableSize.height);
+                      layer.displaySyncEnabled ? 1 : 0, layer.drawableSize.width, layer.drawableSize.height,
+                      layer.wantsExtendedDynamicRangeContent ? 1 : 0);
         Logger::Info(buf);
     }
     if (!Enabled() || !layer || !tex) {
@@ -1105,9 +1185,11 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         if (generated) {
             NoteShown(generated);
             NoteShown(real);
+            Input::Track(real, Input::Current(), "2x");
             present(generated);         // between the previous frame and this one
             presentAfter(real, dt / 2); // this frame half a frame interval later
         } else {
+            Input::Track(real, Input::Current(), "2x");
             present(real);
         }
         return true;

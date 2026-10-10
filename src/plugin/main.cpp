@@ -17,6 +17,7 @@
 #include "Config.hpp"
 #include "ConfigVars.hpp"
 #include "DynamicScale.hpp"
+#include "Input.hpp"
 #include "Denoise.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
@@ -113,6 +114,8 @@ bool Initialize()
 
     Config::Load();
     const auto& config = Config::Get();
+    Input::Start(); // the latency meter's view of the game's mouse input
+    Input::SetFrameLimit(config.frameLimitFps);
     {
         std::ostringstream os;
         os << "Config loaded: enabled=" << (config.enabled ? "yes" : "no")

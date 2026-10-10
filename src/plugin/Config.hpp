@@ -50,6 +50,7 @@ struct Settings {
     bool ultraPerformance = false; // MetalFX at 3x (the engine's hidden Ultra Performance scale)
     bool frameGeneration = false;  // MetalFX frame interpolation (FrameGen.mm)
     int frameGenerationMultiplier = 2; // displayed frames per rendered frame: 2 or 4
+    float frameLimitFps = 0;       // cap, waiting just before the game reads input (Input.mm); 0 off
     float dynamicScaleFps = 0;     // Ultra Performance: hold this rendered fps by scaling between ultraScale and 3 (0 off)
     Quality quality = Quality::Quality;
     float ultraScale = 3.0f;      // render scale of ultra_performance (2.0-3.0; the game's is 3.0)

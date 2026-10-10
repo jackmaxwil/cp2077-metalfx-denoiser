@@ -32,6 +32,7 @@
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
 #include "DynamicScale.hpp"
+#include "Input.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
 
@@ -954,8 +955,12 @@ void PollRequests(uint64_t frame)
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
         FrameGen::Evaluate(std::atoi(name.c_str()));
+    } else if (kind == "framelimit") {
+        Input::SetFrameLimit(std::strtof(name.c_str(), nullptr));
     } else if (kind == "dynscale") {
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
+    } else if (kind == "fgqueue") {
+        FrameGen::SetGenerateOnGameQueue(name == "game");
     } else if (kind == "fgmult") {
         FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
@@ -1843,6 +1848,7 @@ void H_cbPresent(id self, SEL sel, id drawable)
         return;
     }
     OnPresent(true);
+    Input::BeginFrame();
     // Frame generation presents a generated frame and then the game's (FrameGen.mm), through the original methods.
     if (FrameGen::Present(
             self, drawable, [self, sel](id d) { ORIG(o_cbPresent, V1, self)(self, sel, d); },
@@ -1851,6 +1857,7 @@ void H_cbPresent(id self, SEL sel, id drawable)
             })) {
         return;
     }
+    Input::Track(drawable, Input::Current(), "off");
     ORIG(o_cbPresent, V1, self)(self, sel, drawable);
 }
 

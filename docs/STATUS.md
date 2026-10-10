@@ -289,6 +289,24 @@ Setup measured: RT Psycho, Ultra Performance 2.25x (1536x960 -> 3456x2160), the 
   tracing: 2.75, about 28 ms), frame_generation_multiplier = 4: the four frames fill each 33.3 ms exactly.
 - The interpolator's fence property stopped the game's rendering in both runs that used it (not used).
 
+## Input lag (2026-10-10)
+
+- **Latency meter** (Input.mm): the game's event pump is hooked again (read only); each game frame's newest mouse event
+  is timed to the moment its frame is shown (presented handler), per path (off, 2x, 4x), with three parts: event to the
+  game's read, read to present call, present call to display. Logged every 120 frames with mouse movement ("Latency").
+  Needs a visible display (background runs never show a frame).
+- **4x pacer rework.** Found in game (path tracing): the 4x path had no back-pressure (the game's drawables are never
+  presented, so nothing held it back), so the game ran up to three frames ahead of the GPU (frames shown about 130 ms
+  after their present call) and, chained present to present, the pacer ran a frame behind at 30 fps. Now: the present
+  call for frame N waits for frame N-1's GPU work (one frame queued); each frame's presents start when it is ready (the
+  first at once, the rest whole refreshes apart); the rest of a frame is dropped only once a newer frame is ready. In
+  game: 3.8 presents per rendered frame, 2-47 of 120 frames cut short.
+- **Generation off the game's queue** (pacer queue, request "fgqueue game|own"): with path tracing the GPU is saturated,
+  so it changes nothing (48.3 vs 48.4 ms frames, same run); it can use idle GPU time under a cap. Kept on the pacer's queue.
+- **Frame limiter before the input read** (frame_limit_fps; request "framelimit"): waits at the game's first event pump of
+  a frame, so the frame starts from fresh input; use it instead of the game's Maximum FPS. 29 for 4x at 120 Hz.
+- 4x costs about 6-7 ms per frame with path tracing (41-43 -> 48 ms, GPU-bound).
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.

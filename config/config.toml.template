@@ -29,6 +29,9 @@ ultra_scale = 3.0
 # Frame generation: MetalFX generates one frame between every two the game renders (about 3 ms each at 3456x2160), so
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false
+# Frame rate cap that waits right before the game reads input (fresher input than the game's own Maximum FPS, which
+# should then be off). 0 = off. For 120 Hz with frame_generation_multiplier = 4: 29 (four refreshes fit with slack).
+frame_limit_fps = 0
 # With ultra_performance: hold this rendered frame rate by stepping the render scale between ultra_scale (sharpest) and
 # 3.0, at most every 10 s. Each change is a hitch (path tracing: about 160 ms), so it suits slow changes of scene, not
 # frame-to-frame swings. 0 = off (always ultra_scale).

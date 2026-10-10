@@ -11,6 +11,9 @@ bool Enabled();
 // thread). Config frame_generation_multiplier, request "fgmult <2|4>", METALFX_FG_MULT=4.
 void SetMultiplier(int frames);
 int Multiplier();
+// Tests: 4x's halving and interpolations in the game's command buffer (true) or on the pacer's queue (request
+// "fgqueue game|own").
+void SetGenerateOnGameQueue(bool on);
 // Generated frames presented since start.
 unsigned long long Generated();
 // Quality check (request "fgeval <n>", during a steady camera turn): the next n samples, every third frame, interpolate
