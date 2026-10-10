@@ -30,10 +30,12 @@ ultra_scale = 3.0
 # the display shows about twice the frames; responsiveness stays at the rendered rate. Also in ModMenu.
 frame_generation = false
 # With ultra_performance: hold this rendered frame rate by stepping the render scale between ultra_scale (sharpest) and
-# 3.0, at most every 2 s. 0 = off (always ultra_scale). Example: 30 with frame_generation_multiplier = 4 for 120 Hz.
+# 3.0, at most every 10 s. Each change is a hitch (path tracing: about 160 ms), so it suits slow changes of scene, not
+# frame-to-frame swings. 0 = off (always ultra_scale).
 dynamic_scale_fps = 0
 # Displayed frames per rendered frame with frame generation: 2 (one generated frame), or 4 (three, generated at half
-# size: about the same GPU cost as 2, softer in-between frames, the real frame shown a little later).
+# size: about the same GPU cost as 2, softer in-between frames, the real frame shown a little later). For 120 Hz with
+# 4, cap the game at 30 fps (Video settings, Maximum FPS) and pick an ultra_scale that renders in under 33 ms.
 frame_generation_multiplier = 2
 
 [debug]

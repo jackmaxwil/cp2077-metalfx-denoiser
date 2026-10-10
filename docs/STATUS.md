@@ -277,7 +277,16 @@ Setup measured: RT Psycho, Ultra Performance 2.25x (1536x960 -> 3456x2160), the 
 - **Dynamic scale** (dynamic_scale_fps): steps Ultra Performance's scale (0.25 steps, ultra_scale to 3.0, at most
   every 2 s) to hold a rendered fps. The game's own dynamic resolution stops at 50% (2x). In game with a 40 fps target:
   2.25 -> 3.0 in 4 s, then 25.0 ms frames (p95 25.7). The texture LOD bias stays set for ultra_scale.
-- **For 120 Hz:** dynamic_scale_fps = 30 with frame_generation_multiplier = 4: 30 rendered fps, 120 displayed.
+- **Path tracing play test (02:12-02:14) was unstable**, three causes from the log: dynamic scale flipped 2.5 <-> 2.75
+  every 2-5 s (path tracing 34.8 / 27.9 ms against a 33.3 ms target; each change a 147-172 ms frame and about a second of
+  52-62 ms frames: the game resizing its render-size resources; our interpolators rebuild in under 1 ms); 4x flipped
+  between three and one generated frames several times a second (each flip reset the interpolators: a repeated frame);
+  and at 30 fps the pacer had no headroom (queue delay 25-31 ms, generated frames skipped for 40-78 of 120 frames,
+  displayed median 21-23 ms). Fixed: dynamic scale steps rarely (8% over / 15% under by pixel count, 10 s hold, no
+  step back down within 60 s of a step up); 4x always interpolates all three phases, switches on a 1 s average with
+  15% / 5% margins at most every 3 s.
+- **For 120 Hz:** the game's frame cap at 30 fps (MaximumFPS), a fixed ultra_scale that renders under 33 ms (path
+  tracing: 2.75, about 28 ms), frame_generation_multiplier = 4: the four frames fill each 33.3 ms exactly.
 - The interpolator's fence property stopped the game's rendering in both runs that used it (not used).
 
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)

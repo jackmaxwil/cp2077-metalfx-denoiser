@@ -14,17 +14,19 @@
 namespace DynamicScale {
 namespace {
 
-// Steps of 0.25 from minScale up, the last one to 3.0. Frame time model for a step (RT Psycho at 3456x2160, measured: 3x 22.4 ms, 2.5x
-// 28.6, 2.25x 33.8, 2x 41.1): about a quarter of the frame does not depend on the render size, the rest goes with the
-// pixel count (1 / scale^2). A step down (sharper) is only taken when the model says it still meets the target.
+// Steps of 0.25 from minScale up, the last one to 3.0. Each change costs a hitch: the game resizes its render-size
+// resources and rebuilds its upscaler (path tracing: one 150-170 ms frame, then about a second of 50-60 ms frames).
+// So changes are rare: a step up (coarser) when the frame interval is 8% over the target, a step down (sharper) only
+// when the frame time scaled by the pixel count (no fixed part: path tracing grew faster than the pixel count, 2.75x
+// 27.9 ms to 2.5x 34.8 ms) stays 15% under it, at least 10 s apart, and never back down within 60 s of a step up (the
+// sharper scale was just over the target). The earlier 4% / 3% margins, 2 s hold and a model with a quarter of the
+// frame fixed flipped path tracing between 2.5 and 2.75 every 2-5 s.
 constexpr float kStep = 0.25f, kMax = 3.0f;
-constexpr double kFixed = 0.25;
-// A change at most every 2 s: each one resizes the game's render targets (and frame generation's interpolators).
-constexpr double kHold = 2.0;
+constexpr double kHold = 10.0, kNoDownAfterUp = 60.0;
 
 std::mutex s_mutex;
 float s_target = 0, s_min = 3.0f, s_scale = 0;
-double s_ema = 0, s_last = 0, s_changed = 0, s_slowest = 0;
+double s_ema = 0, s_last = 0, s_changed = 0, s_slowest = 0, s_noDownUntil = 0;
 int s_frames = 0;
 bool s_settling = false; // log the slowest frame of the first 30 after a change
 
@@ -36,7 +38,7 @@ double Now()
 
 double Predict(double ms, float from, float to)
 {
-    return ms * (kFixed + (1 - kFixed) * (from * from) / (to * to));
+    return ms * (from * from) / (to * to);
 }
 
 void Set(float scale, const char* why)
@@ -103,10 +105,11 @@ void OnFrame()
         return;
     }
     const double target = 1.0 / s_target;
-    if (s_ema > target * 1.04 && s_scale < kMax) {
+    if (s_ema > target * 1.08 && s_scale < kMax) {
         Set(std::min(kMax, s_scale + kStep), "over the target");
+        s_noDownUntil = now + kNoDownAfterUp;
     } else if (const float down = std::max(s_min, s_scale - kStep);
-               s_ema < target && s_scale > s_min && Predict(s_ema, s_scale, down) < target * 0.97) {
+               now >= s_noDownUntil && s_scale > s_min && Predict(s_ema, s_scale, down) < target * 0.85) {
         Set(down, "room under the target");
     } else {
         return;

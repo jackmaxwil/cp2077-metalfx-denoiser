@@ -550,10 +550,13 @@ id<MTLSharedEvent> g_event;
 uint64_t g_eventValue = 0;
 id<MTLTexture> g_zeroUi; // 1x1 R8 zero: the UI snapshot of frames without one
 // A display shows at most one frame per refresh: four frames per rendered frame need it at or under the refresh rate / 4
-// (30 fps at 120 Hz). Faster, only the midpoint is made and shown. Chosen on the smoothed frame interval, with margins
-// so it does not flip back and forth. Each frame is presented whole refreshes after the one before, as many as fit in
-// the frame interval: the four never take longer than a rendered frame.
-double g_refresh = 1.0 / 120, g_dtEma = 0;
+// (30 fps at 120 Hz). Faster, only the midpoint is shown. Chosen on the frame interval smoothed over about a second, with
+// wide margins and at least 3 s between changes: with path tracing the frame interval wanders across 30-35 ms, and the
+// earlier 8% margins flipped it several times a second (each flip a change of cadence). All three interpolations always
+// run, so a change never resets them (a reset interpolator returns its input: a repeated frame). Each frame is presented
+// whole refreshes after the one before, as many as fit in the frame interval. For 120 Hz, cap the game at 30 fps (its
+// MaximumFPS setting): the four then fill the frame interval exactly.
+double g_refresh = 1.0 / 120, g_dtEma = 0, g_kChanged = 0;
 int g_k = 3; // generated frames shown per rendered frame: 3, or 1
 
 // Pacer statistics, logged every 120 jobs: drawable waits, presents, and how many of them the display showed.
@@ -784,10 +787,8 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
             [blit endEncoding];
             const float aspect = static_cast<float>(tex.width) / tex.height;
             Interpolate(fi[0], cb, p.half, s.half, s.gen[1], 1.0f, dt, aspect);
-            if (g_k == 3) {
-                Interpolate(fi[1], cb, p.half, s.gen[1], s.gen[0], 0.5f, dt / 2, aspect);
-                Interpolate(fi[2], cb, s.gen[1], s.half, s.gen[2], 0.5f, dt / 2, aspect);
-            }
+            Interpolate(fi[1], cb, p.half, s.gen[1], s.gen[0], 0.5f, dt / 2, aspect);
+            Interpolate(fi[2], cb, s.gen[1], s.half, s.gen[2], 0.5f, dt / 2, aspect);
             g_reset = false;
             generated = true;
             Count(4);
@@ -800,15 +801,17 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
     const int k = g_k;
     // Whole refreshes per shown frame (presentDrawable:afterMinimumDuration: waits for the next refresh after it).
     const double n = std::max(1.0, std::floor(g_dtEma / (k + 1) / g_refresh + 0.05));
-    g_dtEma = g_dtEma > 0 ? 0.9 * g_dtEma + 0.1 * dt : dt;
-    // Margins: a game held at 30 fps on a 120 Hz display (33.3 ms frames, dynamic_scale_fps = 30) stays at three.
-    if (g_k == 3 && g_dtEma < 4 * g_refresh * 0.92) {
-        g_k = 1;
-    } else if (g_k == 1 && g_dtEma > 4 * g_refresh * 0.99) {
-        g_k = 3;
-        g_reset = true; // the 1/4 and 3/4 interpolators skipped frames
+    g_dtEma = g_dtEma > 0 ? 0.97 * g_dtEma + 0.03 * dt : dt;
+    const double now = CACurrentMediaTime();
+    if (now - g_kChanged >= 3.0) {
+        if (g_k == 3 && g_dtEma < 4 * g_refresh * 0.85) {
+            g_k = 1;
+        } else if (g_k == 1 && g_dtEma > 4 * g_refresh * 0.95) {
+            g_k = 3;
+        }
     }
     if (k != g_k) {
+        g_kChanged = now;
         Logger::Info(std::string("FrameGen: 4x now shows ") + (g_k == 3 ? "three generated frames" : "one generated frame") +
                      " per frame (frame interval " + std::to_string(g_dtEma * 1000).substr(0, 4) + " ms)");
     }
