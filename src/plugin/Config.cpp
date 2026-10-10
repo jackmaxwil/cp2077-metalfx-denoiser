@@ -115,6 +115,8 @@ bool Load(const std::string& path) {
                 s_settings.ultraPerformance = ParseBool(value);
             } else if (key == "frame_generation") {
                 s_settings.frameGeneration = ParseBool(value);
+            } else if (key == "dynamic_scale_fps") {
+                s_settings.dynamicScaleFps = ParseFloat(value);
             } else if (key == "frame_generation_multiplier") {
                 s_settings.frameGenerationMultiplier = value == "4" ? 4 : 2;
             } else if (key == "quality") {

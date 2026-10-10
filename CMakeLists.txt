@@ -54,6 +54,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/BufferInterceptor.cpp
     src/plugin/Config.cpp
     src/plugin/ConfigVars.cpp
+    src/plugin/DynamicScale.cpp
     src/plugin/Logger.cpp
     src/plugin/MetalTrace.mm
     src/plugin/Denoise.mm
@@ -116,7 +117,7 @@ install(CODE "
 
 # Tracer self-test (not installed): ./build/trace_selftest
 # (trace_selftest links the same frameworks as the plugin)
-add_executable(trace_selftest tests/trace_selftest.mm tests/configvars_stub.cpp src/plugin/MetalTrace.mm
+add_executable(trace_selftest tests/trace_selftest.mm tests/configvars_stub.cpp src/plugin/DynamicScale.cpp src/plugin/MetalTrace.mm
     src/plugin/Denoise.mm src/plugin/FrameGen.mm src/plugin/Logger.cpp)
 target_include_directories(trace_selftest PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
 target_link_libraries(trace_selftest PRIVATE

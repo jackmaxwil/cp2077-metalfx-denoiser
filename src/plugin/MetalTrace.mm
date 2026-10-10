@@ -31,6 +31,7 @@
 #include "MetalTrace.hpp"
 #include "ConfigVars.hpp"
 #include "Denoise.hpp"
+#include "DynamicScale.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
 
@@ -953,6 +954,8 @@ void PollRequests(uint64_t frame)
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
         FrameGen::Evaluate(std::atoi(name.c_str()));
+    } else if (kind == "dynscale") {
+        DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgmult") {
         FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
@@ -1027,6 +1030,7 @@ void OnPresent(bool fromCommandBuffer)
         return; // the command buffer's presentDrawable: already counted this frame
     }
     const uint64_t frame = s_frame.fetch_add(1) + 1;
+    DynamicScale::OnFrame();
     if (s_profResolveAt && frame >= s_profResolveAt) {
         s_profResolveAt = 0;
         WriteProfile();

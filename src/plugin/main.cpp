@@ -16,6 +16,7 @@
 
 #include "Config.hpp"
 #include "ConfigVars.hpp"
+#include "DynamicScale.hpp"
 #include "Denoise.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
@@ -34,7 +35,7 @@ std::atomic<bool> s_denoiser{false}, s_noisy{false}, s_ultra{false}, s_menuRegis
 // MetalFX at 3x: the engine's upscaler scale table has a fourth entry (3.0, "Ultra Performance") that the game's
 // menu does not offer; MFX/OverrideEnable makes the engine take the quality from MFX/Quality (1-4) instead of the
 // settings (docs/PIPELINE_TRACE_FINDINGS.md). Both are verified config variables; off restores the settings' preset.
-std::atomic<float> s_ultraScale{3.0f};
+std::atomic<float> s_ultraScale{3.0f}, s_dynamicFps{0.0f};
 
 void ApplyUltra()
 {
@@ -46,8 +47,10 @@ void ApplyUltra()
         }
         ConfigVars::Apply("MFX/Quality=4");
         ConfigVars::Apply("MFX/OverrideEnable=1");
+        DynamicScale::Configure(env && *env ? 0.0f : s_dynamicFps.load(), scale);
     } else {
         ConfigVars::Apply("MFX/OverrideEnable=0");
+        DynamicScale::Configure(0, 0);
     }
 }
 
@@ -121,6 +124,7 @@ bool Initialize()
     s_denoiser.store(config.enabled);
     s_ultra.store(config.ultraPerformance);
     s_ultraScale.store(config.ultraScale);
+    s_dynamicFps.store(config.dynamicScaleFps);
     if (const char* env = std::getenv("METALFX_FRAMEGEN"); !env || !*env) {
         FrameGen::SetEnabled(config.frameGeneration);
     }

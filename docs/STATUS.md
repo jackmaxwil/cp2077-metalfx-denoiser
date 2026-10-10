@@ -259,6 +259,27 @@ game took focus. Plugin GPU work now bypasses the hooks (`MetalTrace::Internal`)
 - Plugin log: now red4ext/plugins/MetalFXDenoiser/metalfxdenoiser.log; RED4ext's log rotation deleted it in
   red4ext/logs (names that do not start with a plugin's name).
 
+## Toward 120 fps displayed (2026-10-10)
+
+Setup measured: RT Psycho, Ultra Performance 2.25x (1536x960 -> 3456x2160), the game's NRD, M4 Max.
+
+- **Frame generation cost** (tests/fg_bench, per rendered frame): 6.3 -> 4.4 ms. The HUD pass writes the generated
+  drawable itself (two full-screen copies gone) and tests the UI snapshot's 16x mip once widened (1.66 -> 0.27 ms).
+  Left: the interpolator, 3.65 ms at full output, 1.29 ms at half output. In game the 2x overhead read +7 to +9 ms
+  across runs (noise about 2 ms; the display was asleep, which changes drawable waits: see below).
+- **Multi-frame generation** (frame_generation_multiplier = 4): MTLFXFrameInterpolator only makes midpoints;
+  recursive midpoints give 1/4 and 3/4 (tests/fg_phase on an in-game "fgseq" sequence, at four times the motion:
+  1/4 43.0, 1/2 41.0, 3/4 44.5 dB at full output; 41.6, 40.4, 41.5 at half; scaled motion vectors do not move the
+  phase: 28-30 dB, like repeating a frame). Made at half output and upscaled in the HUD pass; a pacer thread presents
+  the four frames whole refreshes apart; three generated frames only when the frame interval allows four refreshes
+  (30 fps at 120 Hz), else one. In game: +2.1 ms frame time (33.8 -> 35.9 ms). Presentation is unverified: the
+  background runs had the display asleep (every present dropped, 0 shown), so pacing needs a run on a visible display.
+- **Dynamic scale** (dynamic_scale_fps): steps Ultra Performance's scale (0.25 steps, ultra_scale to 3.0, at most
+  every 2 s) to hold a rendered fps. The game's own dynamic resolution stops at 50% (2x). In game with a 40 fps target:
+  2.25 -> 3.0 in 4 s, then 25.0 ms frames (p95 25.7). The texture LOD bias stays set for ultra_scale.
+- **For 120 Hz:** dynamic_scale_fps = 30 with frame_generation_multiplier = 4: 30 rendered fps, 120 displayed.
+- The interpolator's fence property stopped the game's rendering in both runs that used it (not used).
+
 ## Path to 60 (path tracing, 16.7 ms rendered at 3456x2160)
 
 Budget today: about 50 ms. Gains below are estimates until step 0 measures them at native resolution.
