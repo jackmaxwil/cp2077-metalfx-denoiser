@@ -14,6 +14,9 @@ unsigned long long Generated();
 // (fgeval<i>-gen-u<0|1>, -real, -prev2, -cur; u1: with the HUD layer as UI texture, u0: without, alternating), after three
 // samples of the normal path (fgnormal<i>-gen, -prev, -cur).
 void Evaluate(int samples);
+// Research (request "fgseq <n>"): the next n presented frames' color, depth and motion as raw dumps (fgseq<i>-color-raw,
+// -depth-raw, -motion-raw) with their camera parameters logged, for tests/fg_phase.mm.
+void SaveSequence(int frames);
 
 #ifdef __OBJC__ // the hooks (MetalTrace.mm); plain C++ (main.cpp, with RED4ext's Windows BOOL) sees only the above
 } // namespace FrameGen

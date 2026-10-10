@@ -139,3 +139,8 @@ target_include_directories(fg_bench PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
 target_compile_options(fg_bench PRIVATE -fobjc-arc -Wno-unguarded-availability-new)
 target_link_libraries(fg_bench PRIVATE "-framework Metal" "-framework MetalFX" "-framework Foundation")
 
+# Multi-frame generation research on a game "fgseq" sequence (not installed): ./build/fg_phase <dump dir> <plugin log>
+add_executable(fg_phase tests/fg_phase.mm)
+target_compile_options(fg_phase PRIVATE -fobjc-arc -Wno-unguarded-availability-new)
+target_link_libraries(fg_phase PRIVATE "-framework Metal" "-framework MetalFX" "-framework MetalPerformanceShaders"
+    "-framework Foundation")

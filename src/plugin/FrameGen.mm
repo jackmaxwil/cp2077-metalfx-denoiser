@@ -322,6 +322,16 @@ void Evaluate(int samples)
     Logger::Info("FrameGen: evaluating " + std::to_string(samples) + " samples");
 }
 
+std::atomic<int> g_seqLeft{0};
+int g_seqIndex = 0;
+
+void SaveSequence(int frames)
+{
+    g_seqIndex = 0;
+    g_seqLeft.store(std::max(0, frames));
+    Logger::Info("FrameGen: saving a sequence of " + std::to_string(frames) + " frames");
+}
+
 void HudComposite(id encoder)
 {
     if (!Enabled()) {
@@ -591,6 +601,21 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         id<CAMetalDrawable> generated = nil;
         id<MTLTexture> genTex = g_out; // what the generated drawable shows (g_out, or the HUD pass output)
         const bool fresh = g_inputsFrame == g_frame && g_depth;
+        if (fresh && g_seqLeft.load() > 0) {
+            char base[32], buf[300];
+            std::snprintf(base, sizeof(base), "fgseq%02d", g_seqIndex);
+            float fov = 60.0f, nearPlane = 0.02f, aspect = static_cast<float>(tex.width) / tex.height;
+            Denoise::Projection(fov, nearPlane, aspect);
+            std::snprintf(buf, sizeof(buf), "FrameGen: %s frame %llu dt %.6f mvscale %.3f %.3f jitter %.4f %.4f fov %.4f "
+                          "near %.5f aspect %.5f reversed %d", base, (unsigned long long)g_frame, dt, g_mvScale[0],
+                          g_mvScale[1], g_jitter[0], g_jitter[1], fov, nearPlane, aspect, g_depthReversed ? 1 : 0);
+            Logger::Info(buf);
+            MetalTrace::SaveTexture(cb, g_cur, std::string(base) + "-color-raw");
+            MetalTrace::SaveTexture(cb, g_depth, std::string(base) + "-depth-raw");
+            MetalTrace::SaveTexture(cb, g_motion, std::string(base) + "-motion-raw");
+            ++g_seqIndex;
+            g_seqLeft.fetch_sub(1);
+        }
         if (!fresh) {
             Count(1);
         } else if (!g_havePrev) {

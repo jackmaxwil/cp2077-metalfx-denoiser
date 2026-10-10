@@ -953,6 +953,8 @@ void PollRequests(uint64_t frame)
         Denoise::SetSharpness(std::strtof(name.c_str(), nullptr));
     } else if (kind == "fgeval") {
         FrameGen::Evaluate(std::atoi(name.c_str()));
+    } else if (kind == "fgseq") {
+        FrameGen::SaveSequence(std::atoi(name.c_str()));
     } else if (kind == "denoiseprepass") {
         Denoise::SetPrepass(name == "on");
     } else if (kind == "denoisecam") {
@@ -1408,7 +1410,7 @@ size_t BytesPerPixel(NSUInteger f)
     case 10: case 13: return 1;
     case 20: case 23: case 25: case 30: return 2;
     case 53: case 55: case 60: case 62: case 63: case 65: case 70: case 71: case 73: case 80: case 81: case 90:
-    case 92: case 94: return 4;
+    case 92: case 94: case 252: case 260: return 4; // 260 (Depth32Float_Stencil8): its depth only
     case 103: case 105: case 110: case 113: case 115: return 8;
     case 123: case 125: return 16;
     default: return 0;
@@ -1486,7 +1488,7 @@ void ConvertAndWrite(const uint8_t* src, size_t w, size_t h, NSUInteger f, const
         case 25: c[0] = c[1] = c[2] = Half(u & 0xFFFF); tonemap = true; break;
         case 30: c[0] = p[0] / 255.0f; c[1] = p[1] / 255.0f; break;
         case 53: c[0] = c[1] = c[2] = (u & 0xFF) / 255.0f; break;
-        case 55: { float v; std::memcpy(&v, p, 4); c[0] = c[1] = c[2] = v; tonemap = true; break; }
+        case 55: case 252: case 260: { float v; std::memcpy(&v, p, 4); c[0] = c[1] = c[2] = v; tonemap = true; break; }
         case 60: c[0] = (u & 0xFFFF) / 65535.0f; c[1] = (u >> 16) / 65535.0f; break;
         case 62: c[0] = 0.5f + 0.5f * std::max(-1.0f, static_cast<int16_t>(u & 0xFFFF) / 32767.0f);
                  c[1] = 0.5f + 0.5f * std::max(-1.0f, static_cast<int16_t>(u >> 16) / 32767.0f); break;
@@ -1546,7 +1548,9 @@ void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                sourceSize:MTLSizeMake(w, h, 1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:row
-                 destinationBytesPerImage:row * h];
+                 destinationBytesPerImage:row * h
+                                  options:f == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil
+                                                                                    : MTLBlitOptionNone];
     [blit endEncoding];
     s_capture.store(wasCapturing);
     const char* fmt = FormatName(f);
