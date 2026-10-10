@@ -132,3 +132,10 @@ target_link_libraries(trace_selftest PRIVATE
 add_executable(denoiser_bench tests/denoiser_bench.mm)
 target_compile_options(denoiser_bench PRIVATE -fobjc-arc -Wno-unguarded-availability-new)
 target_link_libraries(denoiser_bench PRIVATE "-framework Metal" "-framework MetalFX" "-framework Foundation")
+
+# Frame generation cost by part at the game's sizes (not installed): ./build/fg_bench [frames]
+add_executable(fg_bench tests/fg_bench.mm)
+target_include_directories(fg_bench PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+target_compile_options(fg_bench PRIVATE -fobjc-arc -Wno-unguarded-availability-new)
+target_link_libraries(fg_bench PRIVATE "-framework Metal" "-framework MetalFX" "-framework Foundation")
+

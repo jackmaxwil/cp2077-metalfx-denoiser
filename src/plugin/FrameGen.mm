@@ -17,9 +17,11 @@
 // reversed-Z with an infinite far plane, given here as a large finite one).
 //
 // HUD: generated frames take the HUD's pixels from the real frame (RestoreHud, the game's UI layer as mask, widened by
-// its 16x mip over the soft copies the game's HUD composite adds around the HUD).
+// its 16x mip over the soft copies the game's HUD composite adds around the HUD). The HUD pass writes the generated
+// drawable itself (no copies of the generated frame).
 
 #include "FrameGen.hpp"
+#include "FrameGenHud.h"
 #include "Denoise.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
@@ -77,71 +79,6 @@ const bool g_useUi = [] {
     return !(env && *env == '0');
 }();
 
-NSString* const kHudSource = @R"(
-#include <metal_stdlib>
-using namespace metal;
-// Snapshots of the UI layer's alpha (level 0, and its 16x mip when it has one), taken in the game's HUD composite.
-kernel void fg_ui_copy_array(texture2d_array<float, access::read> src [[texture(0)]],
-                             texture2d<float, access::write> dst [[texture(1)]],
-                             constant uint& lod [[buffer(0)]], uint2 p [[thread_position_in_grid]])
-{
-    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(float4(src.read(p, 0, lod).a), p);
-}
-kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
-                       constant uint& lod [[buffer(0)]], uint2 p [[thread_position_in_grid]])
-{
-    if (p.x < dst.get_width() && p.y < dst.get_height()) dst.write(float4(src.read(p, lod).a), p);
-}
-struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; };
-kernel void fg_hud(texture2d<float, access::read_write> gen [[texture(0)]],
-                   texture2d<float, access::read> cur [[texture(1)]],
-                   texture2d<float, access::read> ui [[texture(2)]],
-                   texture2d<float, access::read> low [[texture(3)]],
-                   texture2d<float, access::read> motion [[texture(4)]],
-                   constant HudParams& h [[buffer(0)]],
-                   uint2 p [[thread_position_in_grid]])
-{
-    if (p.x >= gen.get_width() || p.y >= gen.get_height()) return;
-    const int2 s = int2(ui.get_width(), ui.get_height()) - 1;
-    float a = 0.0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x)
-            a = max(a, ui.read(uint2(clamp(int2(p) + int2(x, y), int2(0), s))).r);
-    a = saturate(a * 2.0);
-    // The game's HUD composite also adds soft offset copies of the HUD (up to about 40 px out, from the UI layer's
-    // mips): cover them with the layer's 16x mip, widened by one texel (about +-32 px).
-    if (h.hasLow != 0u) {
-        const int2 m = int2(low.get_width(), low.get_height()) - 1;
-        const float2 size = float2(gen.get_width(), gen.get_height());
-        auto covered = [&](float2 q) { // any HUD in the 3x3 16x texels around output position q
-            const int2 c = int2(q / 16.0);
-            float b = 0.0;
-            for (int y = -1; y <= 1; ++y)
-                for (int x = -1; x <= 1; ++x)
-                    b = max(b, low.read(uint2(clamp(c + int2(x, y), int2(0), m))).r);
-            return b;
-        };
-        float b = covered(float2(p));
-        // The copies the game's HUD composite adds: the UI layer sampled at uv + o * d, d = 2 * (uv - 0.5), with these
-        // offsets o (its constants, logged from the game): up to about 44 px out at the screen's edges.
-        const float2 uv = (float2(p) + 0.5) / size, d = (uv - 0.5) * 2.0;
-        const float2 o[3] = {float2(-0.0050, -0.0025), float2(-0.0108, -0.0068), float2(-0.0126, -0.0073)};
-        for (int i = 0; i < 3; ++i)
-            b = max(b, covered((uv + o[i] * d) * size));
-        // The interpolator fills a pixel from along the scene's motion: where that path crosses the HUD, it can drag HUD
-        // pixels here.
-        const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
-        const float2 mv = motion.read(uint2(clamp(int2(float2(p) * h.outToIn), int2(0), ms))).xy * h.mvToOut;
-        if (dot(mv, mv) > 1.0)
-            for (int i = -4; i <= 4; ++i)
-                b = max(b, covered(float2(p) + mv * (float(i) / 4.0)));
-        a = max(a, saturate(b * 4.0));
-    }
-    // Any coverage takes the real pixel whole: a partial blend keeps part of the interpolated (dragged) HUD.
-    if (h.debug != 0u) { gen.write(a > 0.0 ? float4(1, 0, 1, 1) : float4(0, 1, 0, 1), p); return; }
-    if (a > 0.0) gen.write(cur.read(p), p);
-}
-)";
 id<MTLComputePipelineState> g_hud, g_uiCopy, g_uiCopyArray;
 // The UI layer's alpha as the game's HUD composite read it (HudComposite), for the frame g_uiSnapFrame: reading the
 // game's UI layer itself at present time saw it cleared or half redrawn for the next frame (debug paint all green,
@@ -176,12 +113,16 @@ bool HudPipelines(id<MTLDevice> dev)
     return true;
 }
 
-// Puts the HUD of this frame's real image (cur) over the generated one (gen) where the UI layer snapshot has coverage.
-void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui, float mvFactor)
+// The generated frame (gen) into dst with this frame's HUD (from its real image, cur) wherever the UI layer snapshot has
+// coverage. dst must not be gen: a compute pass writing the interpolator's output right after it lost its writes in the
+// game (MetalFX's output write landed after it); reading it is ordered by hazard tracking. (The interpolator's fence
+// property, waited for here, stopped the game's rendering within a minute in two runs out of two, and never without it;
+// probably as fences only order work within one queue.)
+id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerated)
+
+void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui, id<MTLTexture> dst,
+                float mvFactor)
 {
-    if (!HudPipelines(cb.device)) {
-        return;
-    }
     MetalTrace::Internal internal;
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce setComputePipelineState:g_hud];
@@ -190,6 +131,7 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setTexture:ui atIndex:2];
     [ce setTexture:g_uiSnapLow ? g_uiSnapLow : ui atIndex:3];
     [ce setTexture:g_motion ? g_motion : ui atIndex:4];
+    [ce setTexture:dst atIndex:5];
     // Motion vectors times the game's scale are in render pixels; the output's are larger by the upscale.
     const float sx = g_motion ? static_cast<float>(gen.width) / g_motion.width : 1.0f;
     const float sy = g_motion ? static_cast<float>(gen.height) / g_motion.height : 1.0f;
@@ -202,12 +144,13 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setBytes:&params length:sizeof(params) atIndex:0];
     [ce dispatchThreads:MTLSizeMake(gen.width, gen.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
+    g_lastGen = dst;
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) < 2) {
         char buf[240];
-        std::snprintf(buf, sizeof(buf), "FrameGen: HUD pass encoded (encoder %s, gen %lux%lu usage %lu, ui %lux%lu format %lu)",
-                      class_getName([ce class]), (unsigned long)gen.width, (unsigned long)gen.height,
-                      (unsigned long)gen.usage, (unsigned long)ui.width, (unsigned long)ui.height,
+        std::snprintf(buf, sizeof(buf), "FrameGen: HUD pass encoded (encoder %s, dst %lux%lu usage %lu, ui %lux%lu format %lu)",
+                      class_getName([ce class]), (unsigned long)dst.width, (unsigned long)dst.height,
+                      (unsigned long)dst.usage, (unsigned long)ui.width, (unsigned long)ui.height,
                       (unsigned long)ui.pixelFormat);
         Logger::Info(buf);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
@@ -217,24 +160,23 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     }
 }
 
-// The generated frame (g_out) with this frame's HUD over it, as a new texture: a copy of g_out first, because a compute
-// pass on g_out itself right after the interpolator lost its writes in the game (MetalFX's output write landed after
-// it), while copies of g_out encoded after the interpolator always see its output. g_out when there is no UI layer.
+// The generated frame (g_out) with this frame's HUD into dst (a drawable the HUD pass can write), or into g_hudOut when
+// dst is nil or not writable. Returns what holds it, or nil when there is no UI layer (gen as it is).
 id<MTLTexture> WithHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> ui,
-                       float mvFactor = 1.0f)
+                       id<MTLTexture> dst, float mvFactor = 1.0f)
 {
-    if (!ui || ui.width != gen.width || ui.height != gen.height) {
-        return gen;
+    if (!ui || ui.width != gen.width || ui.height != gen.height || !HudPipelines(cb.device)) {
+        return nil;
     }
-    if (!Fits(g_hudOut, gen)) {
-        g_hudOut = Make(gen.device, gen.pixelFormat, gen.width, gen.height,
-                        MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+    if (!dst || !(dst.usage & MTLTextureUsageShaderWrite) || !Fits(dst, gen)) {
+        if (!Fits(g_hudOut, gen)) {
+            g_hudOut = Make(gen.device, gen.pixelFormat, gen.width, gen.height,
+                            MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+        }
+        dst = g_hudOut;
     }
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:gen toTexture:g_hudOut];
-    [blit endEncoding];
-    RestoreHud(cb, g_hudOut, cur, ui, mvFactor);
-    return g_hudOut;
+    RestoreHud(cb, gen, cur, ui, dst, mvFactor);
+    return dst;
 }
 
 // The UI layer drawn for the frame being presented (most passes, if several); nil if none.
@@ -430,7 +372,7 @@ void SetHudDebug(bool on)
 id LastGenerated()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    return g_hudOut;
+    return g_lastGen;
 }
 
 void SetEnabled(bool on)
@@ -647,7 +589,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
         }
         // A generated frame before it, when this frame has depth and motion and there is a previous frame.
         id<CAMetalDrawable> generated = nil;
-        id<MTLTexture> genTex = g_out; // what the generated drawable shows (g_out, or a copy with the HUD restored)
+        id<MTLTexture> genTex = g_out; // what the generated drawable shows (g_out, or the HUD pass output)
         const bool fresh = g_inputsFrame == g_frame && g_depth;
         if (!fresh) {
             Count(1);
@@ -692,7 +634,10 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             fi.depthReversed = g_depthReversed;
             fi.shouldResetHistory = first;
             [fi encodeToCommandBuffer:cb];
-            id<MTLTexture> shown = WithHud(cb, g_out, g_cur, ui, 2.0f); // doubled motion: N-2 to N
+            id<MTLTexture> shown = WithHud(cb, g_out, g_cur, ui, nil, 2.0f); // doubled motion: N-2 to N
+            if (!shown) {
+                shown = g_out;
+            }
             if (++g_evalWarm <= 2) {
                 goto evalDone;
             }
@@ -743,7 +688,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.depthTexture = g_depth;
                 fi.motionTexture = g_motion;
                 fi.outputTexture = g_out;
-                fi.motionVectorScaleX = g_mvScale[0];
+                    fi.motionVectorScaleX = g_mvScale[0];
                 fi.motionVectorScaleY = g_mvScale[1];
                 fi.jitterOffsetX = g_passJitter ? g_jitter[0] : 0.0f;
                 fi.jitterOffsetY = g_passJitter ? g_jitter[1] : 0.0f;
@@ -759,7 +704,10 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                 fi.shouldResetHistory = g_reset;
                 g_reset = false;
                 [fi encodeToCommandBuffer:cb];
-                genTex = WithHud(cb, g_out, g_cur, g_useUi && g_uiSnapFrame == g_frame ? g_uiSnap : nil);
+                if (id<MTLTexture> hud = WithHud(cb, g_out, g_cur, g_useUi && g_uiSnapFrame == g_frame ? g_uiSnap : nil,
+                                                 generated.texture)) {
+                    genTex = hud;
+                }
                 if (g_evalLeft.load() > 0 && g_evalNormal < 3 && !wasReset) { // what the game-rate path generates
                     const std::string base = "fgnormal" + std::to_string(g_evalNormal++);
                     MetalTrace::SaveTexture(cb, genTex, base + "-gen");
@@ -774,7 +722,7 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
             }
         }
         blit = [cb blitCommandEncoder];
-        if (generated) {
+        if (generated && genTex != generated.texture) {
             [blit copyFromTexture:genTex toTexture:generated.texture];
         }
         [blit copyFromTexture:g_cur toTexture:real.texture];
