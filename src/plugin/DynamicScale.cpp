@@ -14,7 +14,7 @@
 namespace DynamicScale {
 namespace {
 
-// Steps of 0.25 from minScale to 3.0. Frame time model for a step (RT Psycho at 3456x2160, measured: 3x 22.4 ms, 2.5x
+// Steps of 0.25 from minScale up, the last one to 3.0. Frame time model for a step (RT Psycho at 3456x2160, measured: 3x 22.4 ms, 2.5x
 // 28.6, 2.25x 33.8, 2x 41.1): about a quarter of the frame does not depend on the render size, the rest goes with the
 // pixel count (1 / scale^2). A step down (sharper) is only taken when the model says it still meets the target.
 constexpr float kStep = 0.25f, kMax = 3.0f;
@@ -62,7 +62,7 @@ void Configure(float targetFps, float minScale)
     s_target = targetFps > 0 ? std::clamp(targetFps, 10.0f, 240.0f) : 0;
     if (minScale > 0 || s_scale <= 0) {
         if (minScale > 0) {
-            s_min = std::clamp(std::round(minScale / kStep) * kStep, 2.0f, kMax);
+            s_min = std::clamp(minScale, 2.0f, kMax); // the player's scale exactly (steps go from it to 3.0)
         }
         s_scale = s_min; // what ApplyUltra set
     } else if (s_scale > 0 && s_scale != s_min) { // back to the sharpest (request "dynscale")
