@@ -1537,7 +1537,7 @@ void ConvertAndWrite(const uint8_t* src, size_t w, size_t h, NSUInteger f, const
         }
     }
     WritePng(base + ".png", rgb, w, h);
-    if (hasAlpha) {
+    if (hasAlpha && base.find("-shot") == std::string::npos) { // "shot" captures: color only
         WritePng(base + "-alpha.png", alpha, w, h);
     }
 }
@@ -1581,8 +1581,12 @@ void DumpTexture(id cbObject, id<MTLTexture> t, const std::string& what)
                   (unsigned long)w, (unsigned long)h, fmt ? fmt : std::to_string(f).c_str());
     const std::string base = s_dir + "/" + name;
     [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
-      // Off Metal's completion thread: converting a 4K image takes long enough to hold up the game's drawables.
-      dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      // Off Metal's completion thread: converting a 4K image takes long enough to hold up the game's drawables. One
+      // serial queue above utility priority: at utility, with path tracing loading every core, 3 of 24 captures were
+      // written in two minutes.
+      static dispatch_queue_t writer = dispatch_queue_create(
+          "metalfx.dump", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+      dispatch_async(writer, ^{
         ConvertAndWrite(static_cast<const uint8_t*>(buffer.contents), w, h, f, base);
         [buffer release];
       });

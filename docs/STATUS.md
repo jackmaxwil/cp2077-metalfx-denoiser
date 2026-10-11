@@ -275,7 +275,7 @@ Setup measured: RT Psycho, Ultra Performance 2.25x (1536x960 -> 3456x2160), the 
   (30 fps at 120 Hz), else one. In game: +2.1 ms frame time (33.8 -> 35.9 ms). Presentation is unverified: the
   background runs had the display asleep (every present dropped, 0 shown), so pacing needs a run on a visible display.
 - **Dynamic scale** (dynamic_scale_fps): steps Ultra Performance's scale (0.25 steps, ultra_scale to 3.0, at most
-  every 2 s) to hold a rendered fps. The game's own dynamic resolution stops at 50% (2x). In game with a 40 fps target:
+  every 2 s; since changed: 10 s, 2 s on the engine's dynamic resolution) to hold a rendered fps. The game's own dynamic resolution stops at 50% (2x). In game with a 40 fps target:
   2.25 -> 3.0 in 4 s, then 25.0 ms frames (p95 25.7). The texture LOD bias stays set for ultra_scale.
 - **Path tracing play test (02:12-02:14) was unstable**, three causes from the log: dynamic scale flipped 2.5 <-> 2.75
   every 2-5 s (path tracing 34.8 / 27.9 ms against a 33.3 ms target; each change a 147-172 ms frame and about a second of
@@ -420,3 +420,30 @@ captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B;
 - Background test runs froze when the user's windows covered the game's: the game stops rendering for a fully occluded
   window (its occlusion handler and an occlusionState poll). RED4ext's background mode now reports the window visible;
   the earlier "4x hang" (two background runs) was this, not frame generation.
+
+## Sharper 4x frames, flicker checks, fixes (2026-10-11)
+
+- **Player feedback (2026-10-11 play):** finer image than before but the low render scale is obvious; the HUD bands are
+  mostly gone; distortion around car exhausts remains. Render scale now 2.75 (config and ModMenu).
+- **The engine DRS hook was not attached in play:** the installed address DB came from RED4ext's SDK submodule, which
+  was older than the SDK with DRS/Update; the submodule is bumped (cp-dev installs from it). Now "Engine DRS: hooked".
+- **4x detail:** the three half-size generated frames get the detail they lack from the nearer real frame, moved along
+  the motion vectors to their moment, where its half-size copy agrees with them (FrameGenHud.h upsample_detail, tau
+  0.4). fg_phase on the in-game sequence: edge detail 50-56% -> 75-78% of the real frames (generated at full size:
+  84%), PSNR +0.1-0.7 dB; cost within fg_bench's noise. Request "fgdetail on|off".
+- **Latency meter:** half its samples were garbage (hours): the presented handler block captured the FrameInput
+  reference, which pointed at a temporary. Copied now. Valid samples in play: 4x 71-80 ms mouse to display, of which
+  55-60 ms present call to display (waiting for the next real frame, as interpolation must).
+- **Specular hit distance** (request "denoisehit 0|1", off by default): RELAX's noisy specular alpha into an R16Float
+  texture for the denoised scaler. One of two runs crashed in MetalFX's encode (MPSGraph constant folding) on the first
+  frame after a scaler with the hit distance was created; not reproduced offline (40 creations at the game's sizes and
+  formats, alone and with another thread creating scalers). Not measured; stays off.
+- **The game's CAS does not touch the denoised output:** flicker scenario at render scale 2.75 with CAS toggled
+  (`Developer/FeatureToggles/ConstrastAdaptiveSharpening`, applied: logged): captures 2 s apart 45.1-45.3 dB either
+  way, and across the toggle 42.7-43.7 dB, the same as across rounds of one setting (43.2). Render scale 2.75 flickers
+  less than 3 did (44.2 dB yesterday).
+- **Dynamic scale under a frame cap:** frame time is now the interval minus frame_limit_fps's wait, so the cap no
+  longer hides room under the target.
+- Tests: background runs are muted (cp-run sets MasterVolume 0 and MuteInBackground; settings restored). Shot captures
+  are written on their own serial queue (at utility priority 3 of 24 were written in two minutes) without the alpha
+  image. cp-gate passes again (the validator took the scale table in __TEXT,__const for a function).
