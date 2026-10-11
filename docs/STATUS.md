@@ -368,3 +368,19 @@ Budget today: about 50 ms. Gains below are estimates until step 0 measures them 
   thread was stuck in plugin code. The game sat in its inactive-window loop (`0x103d9936c`: Sleep(33) and no frame),
   right after the pacer reported 480 presents with 0 shown. Not yet understood. Background tests set frame generation
   through requests or keep it off.
+
+## Dynamic scale on the engine's dynamic resolution (2026-10-10, P1 of DRS_RECON.md)
+
+- The game's DRS is switched by the hidden setting `/graphics/presets DynamicResolutionScaling` (menu index: none;
+  `0x10169abcc` passes it to the viewport, +0x128), not by MetalFX "Dynamic". On its own it still reallocates: each DRS
+  size made a new MetalFX scaler with content properties off (runs 2026-10-10 19:23, 19:28).
+- MetalFX's dynamic mode (upscaler state `renderer+0x7680` +0x1a) is set only for a viewport quality no menu value
+  reaches. With it, the engine's MetalFX node keeps one scaler with content properties and copies each frame's content
+  into it.
+- EngineDrs.cpp hooks DRS::Update (address DB "DRS/Update", verified by RED4ext.SDK scripts/drs_update.py, which also
+  verifies "Renderer/Global"): while dynamic_scale_fps runs it sets the render size from DynamicScale, widens the floor
+  to 3x, caps the allocation at ultra_scale, and turns MetalFX's dynamic mode on. Denoise skips frames with a content
+  rectangle (the denoised scaler has none); FrameGen snapshots only the content rectangle.
+- Measured (path tracing, dynscale scenario, 3456x2160): step 2.75 -> 3.0, slowest of the next 30 frames 45.3 ms
+  (scale table path: 111-172 ms); one scaler for the run (1257x786, content properties on); 3x frame 34.6 ms, as with the
+  fixed 3x (34.5 ms). Uncapped (DRS maximum 100%), the scaler was native size and the 3x frame 36.5 ms.

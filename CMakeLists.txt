@@ -55,6 +55,7 @@ add_library(MetalFXDenoiser SHARED
     src/plugin/Config.cpp
     src/plugin/ConfigVars.cpp
     src/plugin/DynamicScale.cpp
+    src/plugin/EngineDrs.cpp
     src/plugin/Logger.cpp
     src/plugin/MetalTrace.mm
     src/plugin/Denoise.mm

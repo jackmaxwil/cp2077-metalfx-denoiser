@@ -440,24 +440,23 @@ void AfterScaler(id scaler, id commandBuffer)
     if (!depth || !motion) {
         return;
     }
+    // The engine's dynamic resolution renders into a top-left rectangle of larger textures (content size; the motion
+    // vector scale is the content size too): the snapshots hold just that rectangle, so the interpolators see whole
+    // images. A new content size recreates them like any size change.
+    const NSUInteger w = std::min<NSUInteger>(s.inputContentWidth ?: depth.width, std::min(depth.width, motion.width)),
+                     h = std::min<NSUInteger>(s.inputContentHeight ?: depth.height, std::min(depth.height, motion.height));
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!Fits(g_depth, depth)) {
-        g_depth = Make(depth.device, depth.pixelFormat, depth.width, depth.height,
-                       MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget);
+    if (!g_depth || g_depth.width != w || g_depth.height != h || g_depth.pixelFormat != depth.pixelFormat) {
+        g_depth = Make(depth.device, depth.pixelFormat, w, h, MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget);
     }
-    if (!Fits(g_motion, motion)) {
-        g_motion = Make(motion.device, motion.pixelFormat, motion.width, motion.height, MTLTextureUsageShaderRead);
+    if (!g_motion || g_motion.width != w || g_motion.height != h || g_motion.pixelFormat != motion.pixelFormat) {
+        g_motion = Make(motion.device, motion.pixelFormat, w, h, MTLTextureUsageShaderRead);
     }
     id<MTLBlitCommandEncoder> blit = [(id<MTLCommandBuffer>)commandBuffer blitCommandEncoder];
-    if (depth.textureType == MTLTextureType2D && motion.textureType == MTLTextureType2D) {
-        [blit copyFromTexture:depth toTexture:g_depth];
-        [blit copyFromTexture:motion toTexture:g_motion];
-    } else { // the game's 2D arrays: slice 0
-        for (auto [src, dst] : {std::pair{depth, g_depth}, std::pair{motion, g_motion}}) {
-            [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-                       sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:dst destinationSlice:0
-                 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-        }
+    for (auto [src, dst] : {std::pair{depth, g_depth}, std::pair{motion, g_motion}}) { // 2D or slice 0 of an array
+        [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
     }
     [blit endEncoding];
     g_jitter[0] = s.jitterOffsetX;

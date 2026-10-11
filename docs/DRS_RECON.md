@@ -11,6 +11,11 @@ Everything here is static analysis of the shipping binary, plus three runtime fa
 API query on this Mac, and earlier measurements quoted from STATUS.md. Items that still need a runtime check are marked
 **(verify)**.
 
+> **Correction (2026-10-10, measured):** the engine's DRS is switched on by the hidden `DynamicResolutionScaling`
+> setting, not by MetalFX "Dynamic", and on its own it still makes a new MetalFX scaler per size (no content
+> properties): finding 2 below holds only with MetalFX's dynamic mode (`renderer+0x7680` +0x1a), which no menu value
+> sets. The plugin now sets it (EngineDrs.cpp; STATUS.md, "Dynamic scale on the engine's dynamic resolution").
+
 ## 1. Summary
 
 **Findings**

@@ -744,6 +744,9 @@ bool EncodeScaler(id scaler, id commandBuffer)
         if (g_diffuse.width != s.inputWidth || g_diffuse.height != s.inputHeight) {
             return false; // G-buffer at another size (resolution change in progress)
         }
+        if (s.inputContentWidth != s.inputWidth || s.inputContentHeight != s.inputHeight) {
+            return false; // the engine's dynamic resolution: a content rectangle the denoised scaler cannot take
+        }
         id<MTLFXTemporalDenoisedScaler> ds = g_scaler;
         if (!ds || ds.inputWidth != s.inputWidth || ds.inputHeight != s.inputHeight ||
             ds.outputWidth != s.outputWidth || ds.outputHeight != s.outputHeight ||

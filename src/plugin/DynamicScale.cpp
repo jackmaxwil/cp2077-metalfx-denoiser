@@ -1,6 +1,7 @@
 #include "DynamicScale.hpp"
 
 #include "ConfigVars.hpp"
+#include "EngineDrs.hpp"
 #include "Logger.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace DynamicScale {
 namespace {
@@ -21,8 +23,10 @@ namespace {
 // 27.9 ms to 2.5x 34.8 ms) stays 15% under it, at least 10 s apart, and never back down within 60 s of a step up (the
 // sharper scale was just over the target). The earlier 4% / 3% margins, 2 s hold and a model with a quarter of the
 // frame fixed flipped path tracing between 2.5 and 2.75 every 2-5 s.
+// With the engine's own dynamic resolution running (MetalFX "Dynamic", EngineDrs) a change only moves the content
+// rectangle: no reallocation, no new scaler, history kept. Then the holds are short.
 constexpr float kStep = 0.25f, kMax = 3.0f;
-constexpr double kHold = 10.0, kNoDownAfterUp = 60.0;
+constexpr double kHold = 10.0, kNoDownAfterUp = 60.0, kEngineHold = 2.0, kEngineNoDownAfterUp = 10.0;
 
 std::mutex s_mutex;
 float s_target = 0, s_min = 3.0f, s_scale = 0;
@@ -44,7 +48,15 @@ double Predict(double ms, float from, float to)
 void Set(float scale, const char* why)
 {
     std::string err;
-    if (!ConfigVars::SetUltraScale(scale, err)) {
+    static bool hinted = false;
+    if (EngineDrs::Active()) {
+        EngineDrs::SetScale(scale, s_min);
+    } else if (!std::exchange(hinted, true)) {
+        Logger::Info("Dynamic scale: the game's dynamic resolution is off, so each change reallocates (about 160 ms); "
+                     "set DynamicResolutionScaling to true under /graphics/presets in UserSettings.json for "
+                     "hitch-free changes");
+    }
+    if (!EngineDrs::Active() && !ConfigVars::SetUltraScale(scale, err)) {
         Logger::Warn("Dynamic scale: " + std::to_string(scale) + " not applied (" + err + "): off");
         s_target = 0;
         return;
@@ -73,6 +85,7 @@ void Configure(float targetFps, float minScale)
             s_scale = s_min;
         }
     }
+    EngineDrs::SetScale(s_target > 0 ? s_scale : 0, s_target > 0 ? s_min : 0);
     s_ema = 0;
     s_frames = 0;
     if (s_target > 0) {
@@ -101,13 +114,14 @@ void OnFrame()
         Logger::Info(buf);
         s_settling = false;
     }
-    if (s_frames < 30 || now - s_changed < kHold) {
+    const bool engine = EngineDrs::Active();
+    if (s_frames < 30 || now - s_changed < (engine ? kEngineHold : kHold)) {
         return;
     }
     const double target = 1.0 / s_target;
     if (s_ema > target * 1.08 && s_scale < kMax) {
         Set(std::min(kMax, s_scale + kStep), "over the target");
-        s_noDownUntil = now + kNoDownAfterUp;
+        s_noDownUntil = now + (engine ? kEngineNoDownAfterUp : kNoDownAfterUp);
     } else if (const float down = std::max(s_min, s_scale - kStep);
                now >= s_noDownUntil && s_scale > s_min && Predict(s_ema, s_scale, down) < target * 0.85) {
         Set(down, "room under the target");

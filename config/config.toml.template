@@ -36,8 +36,10 @@ camera_warp = false
 # should then be off). 0 = off. For 120 Hz with frame_generation_multiplier = 4: 29 (four refreshes fit with slack).
 frame_limit_fps = 0
 # With ultra_performance: hold this rendered frame rate by stepping the render scale between ultra_scale (sharpest) and
-# 3.0, at most every 10 s. Each change is a hitch (path tracing: about 160 ms), so it suits slow changes of scene, not
-# frame-to-frame swings. 0 = off (always ultra_scale).
+# 3.0. With the game's dynamic resolution on (UserSettings.json, /graphics/presets: DynamicResolutionScaling = true;
+# not in the menu) a change costs nothing (MetalFX keeps one scaler and its history) and steps come every 2 s at most.
+# Without it each change reallocates the render targets (path tracing: about 160 ms), at most every 10 s.
+# 0 = off (always ultra_scale).
 dynamic_scale_fps = 0
 # Displayed frames per rendered frame with frame generation: 2 (one generated frame), or 4 (three, generated at half
 # size: about the same GPU cost as 2, softer in-between frames, the real frame shown a little later). For 120 Hz with

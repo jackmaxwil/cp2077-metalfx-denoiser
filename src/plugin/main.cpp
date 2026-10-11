@@ -17,6 +17,7 @@
 #include "Config.hpp"
 #include "ConfigVars.hpp"
 #include "DynamicScale.hpp"
+#include "EngineDrs.hpp"
 #include "Input.hpp"
 #include "Warp.hpp"
 #include "Denoise.hpp"
@@ -242,7 +243,11 @@ RED4EXT_C_EXPORT bool RED4EXT_CALL Main(RED4ext::v1::PluginHandle aHandle, RED4e
 {
     switch (aReason) {
     case RED4ext::v1::EMainReason::Load:
-        return MetalFXDenoiser::Initialize();
+        if (!MetalFXDenoiser::Initialize()) {
+            return false;
+        }
+        EngineDrs::Attach(aHandle, aSdk);
+        return true;
     case RED4ext::v1::EMainReason::Unload:
         MetalFXDenoiser::Shutdown();
         return true;
@@ -255,7 +260,7 @@ RED4EXT_C_EXPORT void RED4EXT_CALL Query(RED4ext::v1::PluginInfo* aInfo)
     aInfo->name = L"MetalFX Denoiser";
     aInfo->author = L"Cyberpunk 2077 macOS Modding Community";
     aInfo->version = RED4EXT_V1_SEMVER(1, 1, 0);
-    // Uses no game addresses, so it does not depend on the runtime version.
+    // Game addresses come from the verified address DB and are checked before use (fail closed).
     aInfo->runtime = RED4EXT_V1_RUNTIME_VERSION_INDEPENDENT;
     aInfo->sdk = RED4EXT_V1_SDK_VERSION_CURRENT;
 }
