@@ -19,6 +19,8 @@ struct FrameInput {
 // Caps the game's frame rate by waiting right before it reads input for a frame (0 = off). Use instead of the game's
 // MaximumFPS, not with it.
 void SetFrameLimit(float fps);
+// Seconds the frame limit waited since the previous call (the frame interval minus this is what a frame took uncapped).
+double TakeLimiterWait();
 
 // At the game's present call (render thread): what the game read for this frame, kept as the current frame's input.
 void BeginFrame();

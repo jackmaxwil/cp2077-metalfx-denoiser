@@ -35,6 +35,7 @@ NextFn o_next = nullptr;
 // a pause of over 4 ms), so the frame starts from the newest input; a limiter that waits after the input read (or at
 // present) lets the input age by the wait. Main thread only.
 std::atomic<double> g_limitInterval{0};
+std::atomic<double> g_slept{0}; // seconds waited since the last TakeLimiterWait
 double g_lastPump = 0, g_nextStart = 0;
 
 void Limit()
@@ -50,6 +51,7 @@ void Limit()
         std::this_thread::sleep_for(std::chrono::duration<double>(g_nextStart - now));
     }
     const double start = CACurrentMediaTime();
+    g_slept.fetch_add(start - now, std::memory_order_relaxed);
     // The next start one interval after this one's target (no drift); first, or over a frame late: from now.
     g_nextStart = start - g_nextStart > interval ? start + interval : g_nextStart + interval;
     g_lastPump = start;
@@ -120,6 +122,11 @@ void SetFrameLimit(float fps)
     }
 }
 
+double TakeLimiterWait()
+{
+    return g_slept.exchange(0);
+}
+
 void BeginFrame()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -164,8 +171,9 @@ bool Counts(double t, double& x, double& y, double* latest)
     return true;
 }
 
-void Track(id drawable, const FrameInput& in, const char* path)
+void Track(id drawable, const FrameInput& frame, const char* path)
 {
+    const FrameInput in = frame; // a copy: a block captures a reference as a reference (here to a temporary)
     if (in.event <= 0 || !drawable) {
         return; // no mouse movement went into this frame
     }

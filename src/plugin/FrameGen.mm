@@ -125,6 +125,7 @@ bool HudPipelines(id<MTLDevice> dev)
 struct HudInputs {
     id<MTLTexture> ui, low, motion;
     float mvScale[2];
+    id<MTLTexture> curHalf = nil, prev = nil, prevHalf = nil; // 4x: detail for half-size generated frames (all or none)
 };
 
 // The generated frame (gen: output size, or smaller and upscaled bilinear) into dst with this frame's HUD (from its real
@@ -133,6 +134,11 @@ struct HudInputs {
 // is ordered by hazard tracking. (The interpolator's fence property, waited for here, stopped the game's rendering
 // within a minute in two runs out of two, and never without it; probably as fences only order work within one queue.)
 id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerated)
+// 4x's half-size generated frames get the fine detail they lack from the nearer real frame, moved along the motion
+// vectors to their moment, where the real frame's half-size copy agrees with them (FrameGenHud.h upsample_detail).
+// fg_phase on an in-game sequence (four times the motion): edge detail kept 50-56% -> 75-78% of the real frames
+// (generated at full size: 84%), +0.1-0.7 dB; request "fgdetail on|off".
+std::atomic<bool> g_fgDetail{true};
 
 void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, const HudInputs& h, id<MTLTexture> dst,
                 float mvFactor, const Warp::Params* warp = nullptr, float phase = 0.5f)
@@ -146,6 +152,10 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setTexture:h.low ? h.low : h.ui atIndex:3];
     [ce setTexture:h.motion ? h.motion : h.ui atIndex:4];
     [ce setTexture:dst atIndex:5];
+    const bool detail = h.curHalf && h.prev && h.prevHalf && h.motion && gen.width < dst.width && g_fgDetail.load();
+    [ce setTexture:detail ? h.curHalf : gen atIndex:6];
+    [ce setTexture:detail ? h.prev : cur atIndex:7];
+    [ce setTexture:detail ? h.prevHalf : gen atIndex:8];
     // Motion vectors times the game's scale are in render pixels; the output's are larger by the upscale.
     const float sx = h.motion ? static_cast<float>(dst.width) / h.motion.width : 1.0f;
     const float sy = h.motion ? static_cast<float>(dst.height) / h.motion.height : 1.0f;
@@ -154,11 +164,14 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
         simd_float2 mvToOut, outToIn;
         uint32_t warp;
         float phase;
+        uint32_t detail;
+        float tau;
         simd_float4x4 P, Pinv;
         simd_float3x3 M;
     } params = {g_hudDebug.load() ? 1u : 0u, h.low ? 1u : 0u,
                 simd_make_float2(h.motion ? h.mvScale[0] * sx * mvFactor : 0.0f, h.motion ? h.mvScale[1] * sy * mvFactor : 0.0f),
-                simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, phase, matrix_identity_float4x4,
+                simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, phase, detail ? 1u : 0u, 0.4f,
+                matrix_identity_float4x4,
                 matrix_identity_float4x4, matrix_identity_float3x3};
     if (warp) {
         params.P = warp->P;
@@ -410,6 +423,11 @@ void HudComposite(id encoder)
         [ce dispatchThreads:MTLSizeMake(dst.width, dst.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     }
     g_uiSnapFrame = frame + 1; // for the frame being presented next
+}
+
+void SetDetail(bool on)
+{
+    g_fgDetail.store(on);
 }
 
 void SetHudDebug(bool on)
@@ -759,8 +777,14 @@ void Pacer()
                 }
                 Warp::Params wp;
                 const bool warp = Warp::Make(job.prevView, job.view, phase, shownAt, wp);
-                const HudInputs hud{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
-                                    {job.mvScale[0], job.mvScale[1]}};
+                HudInputs hud{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
+                              {job.mvScale[0], job.mvScale[1]}};
+                if (generated) {
+                    const Slot& p = g_slots[job.prevSlot];
+                    hud.curHalf = s.half;
+                    hud.prev = p.real;
+                    hud.prevHalf = p.half;
+                }
                 if (i < 3) {
                     RestoreHud(cb, s.gen[i], s.real, hud, d.texture, 1.0f, warp ? &wp : nullptr, (i + 1) / 4.0f);
                 } else if (warp) {

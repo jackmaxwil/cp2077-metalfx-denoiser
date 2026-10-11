@@ -34,8 +34,9 @@ kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], textur
 }
 // warp != 0: the scene is turned (camera warp, Warp.mm): each output pixel samples gen where its direction lies in gen's
 // view (M: new view to gen's view; P: view to clip); HUD pixels stay put.
-struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; uint warp; float phase; float4x4 P; float4x4 Pinv;
-                   float3x3 M; };
+// detail: half-size gen frames get detail from the real frames (upsample_detail; tau its cutoff).
+struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; uint warp; float phase; uint detail; float tau;
+                   float4x4 P; float4x4 Pinv; float3x3 M; };
 // Half size (each texel the mean of 2x2: one bilinear sample at their shared corner), for interpolating at half output.
 kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
                     uint2 p [[thread_position_in_grid]])
@@ -64,6 +65,61 @@ static inline float4 sample_cr(texture2d<float, access::sample> t, float2 uv)
                t.sample(bilinear, float2(t3.x, t3.y)) * w3.x * w3.y;
     return max(r, float4(0.0)); // the negative lobes can undershoot
 }
+// A half-size generated frame at output pixel q (pixel units, centers at +0.5): Catmull-Rom, plus the fine detail it
+// lacks, taken from a real frame moved to the generated frame's moment (phase t: from the real frame at q - (1 - t) m,
+// or from the previous one at q + t m, m the motion vector at q in output pixels; mode 1 the nearer one, 2 both
+// weighted by nearness). The detail is the real frame minus its half-size copy upsampled the same way; it is added
+// only where that half-size copy agrees with the generated frame (tau: the relative difference where it stops), so
+// disocclusions and content the motion vectors do not carry (particles, smoke) keep the interpolator's pixels.
+struct DetailParams { float2 mvToOut; float2 outToIn; float phase; uint mode; float tau; };
+static inline float detail_weight(float3 base, float3 lo, float tau)
+{
+    const float3 d = abs(base - lo);
+    const float l = max(max(max(lo.r, lo.g), lo.b), max(max(base.r, base.g), base.b));
+    return saturate(1.0 - max(max(d.r, d.g), d.b) / (tau * l + 0.004));
+}
+static inline float4 upsample_detail(texture2d<float, access::sample> gen, texture2d<float, access::sample> cur,
+                                     texture2d<float, access::sample> curHalf, texture2d<float, access::sample> prev,
+                                     texture2d<float, access::sample> prevHalf, texture2d<float, access::read> motion,
+                                     texture2d<float, access::read> ui, float2 q, float2 size, DetailParams dp)
+{
+    const float4 base = sample_cr(gen, q / size);
+    if (dp.mode == 0u) return base;
+    const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
+    const float2 mv = motion.read(uint2(clamp(int2(q * dp.outToIn), int2(0), ms))).xy * dp.mvToOut;
+    float3 add = float3(0.0);
+    float wsum = 0.0;
+    for (int k = 0; k < 2; ++k) {
+        const bool fromCur = k == 0;
+        const float near = fromCur ? dp.phase : 1.0 - dp.phase; // 1 at that frame's moment
+        if (dp.mode == 1u && (fromCur ? dp.phase < 0.5 : dp.phase >= 0.5)) continue;
+        const float2 r = fromCur ? q - mv * (1.0 - dp.phase) : q + mv * dp.phase;
+        if (any(r < float2(0.0)) || any(r > size)) continue;
+        // The real frames have the HUD: no detail from there.
+        if (ui.read(uint2(clamp(int2(r), int2(0), int2(ui.get_width(), ui.get_height()) - 1))).r > 0.0) continue;
+        const float2 ruv = r / size;
+        const float3 hi = sample_cr(fromCur ? cur : prev, ruv).rgb;
+        const float3 lo = sample_cr(fromCur ? curHalf : prevHalf, ruv).rgb;
+        const float w = detail_weight(base.rgb, lo, dp.tau) * (dp.mode == 1u ? 1.0 : near);
+        add += w * (hi - lo);
+        wsum += dp.mode == 1u ? 1.0 : near;
+    }
+    return float4(max(base.rgb + (wsum > 0.0 ? add / wsum : float3(0.0)), float3(0.0)), base.a);
+}
+kernel void fg_upsample_detail(texture2d<float, access::sample> gen [[texture(0)]],
+                               texture2d<float, access::sample> cur [[texture(1)]],
+                               texture2d<float, access::sample> curHalf [[texture(2)]],
+                               texture2d<float, access::sample> prev [[texture(3)]],
+                               texture2d<float, access::sample> prevHalf [[texture(4)]],
+                               texture2d<float, access::read> motion [[texture(5)]],
+                               texture2d<float, access::read> ui [[texture(6)]],
+                               texture2d<float, access::write> dst [[texture(7)]],
+                               constant DetailParams& dp [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= dst.get_width() || p.y >= dst.get_height()) return;
+    const float2 size = float2(dst.get_width(), dst.get_height());
+    dst.write(upsample_detail(gen, cur, curHalf, prev, prevHalf, motion, ui, float2(p) + 0.5, size, dp), p);
+}
 // The generated frame (gen, output size or smaller: sampled bilinear) into dst. HUD pixels take the real frame (cur) as
 // it is (the HUD does not move on screen); around the HUD, where the interpolator may have dragged HUD pixels, the scene
 // comes from the real frame reprojected to the generated frame's moment (phase: 0 the previous frame, 1 the real one):
@@ -77,6 +133,9 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
                    texture2d<float, access::read> low [[texture(3)]],
                    texture2d<float, access::read> motion [[texture(4)]],
                    texture2d<float, access::write> dst [[texture(5)]],
+                   texture2d<float, access::sample> curHalf [[texture(6)]],
+                   texture2d<float, access::sample> prev [[texture(7)]],
+                   texture2d<float, access::sample> prevHalf [[texture(8)]],
                    constant HudParams& h [[buffer(0)]],
                    uint2 p [[thread_position_in_grid]])
 {
@@ -144,7 +203,7 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
         const int2 ri = int2(clamp(r, float2(0.0), size - 1.0));
         // Unless that lands on the HUD itself (the real frame has the HUD there): then the generated pixel.
         if (ui.read(uint2(clamp(ri, int2(0), s))).r == 0.0) {
-            dst.write(cur.sample(bilinear, (r + 0.5) / size), p);
+            dst.write(cur.sample(bilinear, r / size), p);
             return;
         }
         if (!turned) {
@@ -152,6 +211,11 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
             return;
         }
     }
-    dst.write(gen.get_width() < dst.get_width() ? sample_cr(gen, uv) : gen.sample(bilinear, uv), p);
+    if (gen.get_width() >= dst.get_width()) {
+        dst.write(gen.sample(bilinear, uv), p);
+        return;
+    }
+    const DetailParams dp = {h.mvToOut, h.outToIn, h.phase, h.detail, h.tau};
+    dst.write(upsample_detail(gen, cur, curHalf, prev, prevHalf, motion, ui, uv * size, size, dp), p);
 }
 )";

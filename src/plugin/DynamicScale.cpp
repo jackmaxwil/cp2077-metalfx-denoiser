@@ -2,6 +2,7 @@
 
 #include "ConfigVars.hpp"
 #include "EngineDrs.hpp"
+#include "Input.hpp"
 #include "Logger.hpp"
 
 #include <algorithm>
@@ -23,6 +24,8 @@ namespace {
 // 27.9 ms to 2.5x 34.8 ms) stays 15% under it, at least 10 s apart, and never back down within 60 s of a step up (the
 // sharper scale was just over the target). The earlier 4% / 3% margins, 2 s hold and a model with a quarter of the
 // frame fixed flipped path tracing between 2.5 and 2.75 every 2-5 s.
+// Frame time is the frame interval minus the plugin's frame limit wait (frame_limit_fps), so a cap does not hide the room
+// under the target.
 // With the engine's own dynamic resolution running (MetalFX "Dynamic", EngineDrs) a change only moves the content
 // rectangle: no reallocation, no new scaler, history kept. Then the holds are short.
 constexpr float kStep = 0.25f, kMax = 3.0f;
@@ -98,7 +101,9 @@ void OnFrame()
 {
     const double now = Now();
     std::lock_guard<std::mutex> lock(s_mutex);
-    const double dt = s_last > 0 ? now - s_last : 0;
+    // Under the plugin's frame limit the interval is the limit: what the frame took is the interval minus the wait.
+    const double wait = Input::TakeLimiterWait();
+    const double dt = s_last > 0 ? std::max(now - s_last - wait, 0.25 * (now - s_last)) : 0;
     s_last = now;
     if (s_target <= 0 || dt <= 0 || dt > 0.5) { // off, or a loading screen or pause
         s_ema = 0;

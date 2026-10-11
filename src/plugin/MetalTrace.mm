@@ -966,10 +966,14 @@ void PollRequests(uint64_t frame)
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgqueue") {
         FrameGen::SetGenerateOnGameQueue(name == "game");
+    } else if (kind == "fgdetail") {
+        FrameGen::SetDetail(name == "on");
     } else if (kind == "fgmult") {
         FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
         FrameGen::SaveSequence(std::atoi(name.c_str()));
+    } else if (kind == "denoisehit") {
+        Denoise::SetHitDistance(name == "off" ? -1 : std::atoi(name.c_str()));
     } else if (kind == "denoiseexposure") {
         Denoise::SetAutoExposure(name == "auto");
     } else if (kind == "denoiseprepass") {

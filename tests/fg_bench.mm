@@ -186,14 +186,18 @@ int main(int argc, char** argv)
                    [ce endEncoding];
                }));
         id<MTLFence> fence = getenv("FG_BENCH_FENCE") ? [d newFence] : nil; // as FrameGen (interpolator fence)
-        auto hudPass = [&](id<MTLCommandBuffer> cb, float mv, bool warp = false) {
+        id<MTLTexture> halfGen = Make(d, color, ow / 2, oh / 2, rw);
+        auto hudPass = [&](id<MTLCommandBuffer> cb, float mv, bool warp = false, bool half = false) {
             id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
             if (fence) {
                 [ce waitForFence:fence];
             }
             [ce setComputePipelineState:hud];
-            [ce setTexture:out atIndex:0];
+            [ce setTexture:half ? halfGen : out atIndex:0];
             [ce setTexture:cur atIndex:1];
+            [ce setTexture:halfGen atIndex:6];
+            [ce setTexture:prev atIndex:7];
+            [ce setTexture:halfGen atIndex:8];
             [ce setTexture:snap atIndex:2];
             [ce setTexture:snapLow atIndex:3];
             [ce setTexture:motion atIndex:4];
@@ -203,10 +207,12 @@ int main(int argc, char** argv)
                 simd_float2 mvToOut, outToIn;
                 uint32_t warp;
                 float phase;
+                uint32_t detail;
+                float tau;
                 simd_float4x4 P, Pinv;
                 simd_float3x3 M;
-            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u, 0.5f,
-                        matrix_identity_float4x4, matrix_identity_float4x4,
+            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u, 0.25f,
+                        half ? 1u : 0u, 0.4f, matrix_identity_float4x4, matrix_identity_float4x4,
                         simd_matrix3x3(simd_quaternion(0.02f, simd_make_float3(0, 1, 0)))}; // a 1 degree turn
             [ce setBytes:&params length:sizeof(params) atIndex:0];
             [ce dispatchThreads:MTLSizeMake(ow, oh, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
@@ -217,6 +223,8 @@ int main(int argc, char** argv)
         printf("| HUD restore, moving | %.3f |\n", Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 30); }));
         printf("| HUD restore, moving, with camera warp | %.3f |\n",
                Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 30, true); }));
+        printf("| HUD restore, moving, half-size frame with detail (4x) | %.3f |\n",
+               Time(q, frames, [&](id<MTLCommandBuffer> cb, int) { hudPass(cb, 30, false, true); }));
 
         // Everything FrameGen does per rendered frame, in one command buffer (as in the game's).
         id<MTLFXFrameInterpolator> fi = Interpolator(d, 1536, 960, ow, oh);

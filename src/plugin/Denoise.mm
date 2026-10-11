@@ -147,6 +147,14 @@ id g_scaler;                                                  // id<MTLFXTempora
 // so the denoiser sees raw HDR lighting; with auto exposure it measures the exposure itself. Recreates the scaler.
 std::atomic<bool> g_autoExposure{false};
 bool g_scalerAuto = false;
+// Specular hit distance for the denoised scaler (request "denoisehit off|0|1"): RELAX's noisy specular radiance has the
+// hit distance in alpha; written into g_hit (R16Float) next to the pass-through copies. Path tracing's chain has two
+// textures (which one is specular is by allocation order: the request picks the index); RT's specular chain has one.
+std::atomic<int> g_hitIndex{-1};
+int g_scalerHit = -1;
+std::atomic<uint64_t> g_hitFrame{~0ull};
+id<MTLTexture> g_hit;
+id<MTLComputePipelineState> g_hitCopy;
 
 NSString* const kSource = @R"(
 #include <metal_stdlib>
@@ -158,6 +166,13 @@ kernel void mfxd_copy(texture2d_array<half, access::read> a [[texture(0)]],
 {
     if (p.x >= b.get_width() || p.y >= b.get_height()) return;
     b.write(a.read(p, 0), p, 0);
+}
+
+kernel void mfxd_hit(texture2d_array<half, access::read> a [[texture(0)]], texture2d<half, access::write> b [[texture(1)]],
+                     uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= b.get_width() || p.y >= b.get_height()) return;
+    b.write(half4(max(a.read(p, 0).a, half(0.0))), p);
 }
 
 kernel void mfxd_guides(texture2d_array<float, access::read> base [[texture(0)]],
@@ -230,8 +245,9 @@ bool MakePipelines(id<MTLDevice> device)
         g_rcas = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_rcas"] error:&error];
         g_rcasArray = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_rcas_array"]
                                                             error:&error];
+        g_hitCopy = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_hit"] error:&error];
     }
-    if (!g_copy || !g_guides || !g_rcas || !g_rcasArray) {
+    if (!g_copy || !g_guides || !g_rcas || !g_rcasArray || !g_hitCopy) {
         Logger::Error(std::string("Denoise: kernels failed: ") +
                       (error ? error.localizedDescription.UTF8String : "no library"));
         g_copy = nil;
@@ -451,6 +467,12 @@ bool SetMode(const std::string& mode)
     return true;
 }
 
+void SetHitDistance(int index)
+{
+    g_hitIndex.store(index);
+    Logger::Info("Denoise: specular hit distance " + (index < 0 ? std::string("off") : "from texture " + std::to_string(index)));
+}
+
 void SetAutoExposure(bool on)
 {
     g_autoExposure.store(on);
@@ -622,6 +644,7 @@ void EndEncoding(id encoder)
 {
     std::vector<Job> jobs;
     bool hudComposite = false;
+    const Chain* chain = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_enc.find((__bridge const void*)encoder);
@@ -633,6 +656,7 @@ void EndEncoding(id encoder)
         }
         jobs = std::move(it->second.jobs);
         hudComposite = it->second.hudComposite;
+        chain = it->second.chain;
         g_enc.erase(it);
     }
     if (hudComposite) {
@@ -657,6 +681,25 @@ void EndEncoding(id encoder)
     }
     const uint64_t frame = g_frame.load();
     g_passFrame.store(frame);
+    const int hit = g_hitIndex.load();
+    const size_t hi = chain && chain->width == 1 ? 0 : static_cast<size_t>(std::max(hit, 0));
+    if (g_mode.load() == Fx && hit >= 0 && chain && std::strcmp(chain->name, "diffuse") != 0 && hi < jobs.size() &&
+        Array(jobs[hi].in)) {
+        id<MTLTexture> in = jobs[hi].in;
+        if (!g_hit || g_hit.width != in.width || g_hit.height != in.height) {
+            MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
+                                                                                     width:in.width height:in.height
+                                                                                 mipmapped:NO];
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            d.storageMode = MTLStorageModePrivate;
+            g_hit = [ce.device newTextureWithDescriptor:d];
+        }
+        [ce setComputePipelineState:g_hitCopy];
+        [ce setTexture:in atIndex:0];
+        [ce setTexture:g_hit atIndex:1];
+        [ce dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        g_hitFrame.store(frame);
+    }
     if (g_mode.load() == Fx && g_guideFrame.exchange(frame) != frame) {
         EncodeGuides(ce);
     }
@@ -761,7 +804,7 @@ bool EncodeScaler(id scaler, id commandBuffer)
         if (!ds || ds.inputWidth != s.inputWidth || ds.inputHeight != s.inputHeight ||
             ds.outputWidth != s.outputWidth || ds.outputHeight != s.outputHeight ||
             ds.colorTextureFormat != color.pixelFormat || ds.motionTextureFormat != motion.pixelFormat ||
-            g_scalerAuto != g_autoExposure.load()) {
+            g_scalerAuto != g_autoExposure.load() || g_scalerHit != g_hitIndex.load()) {
             MTLFXTemporalDenoisedScalerDescriptor* d = [MTLFXTemporalDenoisedScalerDescriptor new];
             d.colorTextureFormat = color.pixelFormat;
             d.depthTextureFormat = depth.pixelFormat;
@@ -778,6 +821,11 @@ bool EncodeScaler(id scaler, id commandBuffer)
             d.requiresSynchronousInitialization = YES;
             d.autoExposureEnabled = g_autoExposure.load();
             g_scalerAuto = d.autoExposureEnabled;
+            g_scalerHit = g_hitIndex.load();
+            if (g_scalerHit >= 0) {
+                d.specularHitDistanceTextureEnabled = YES;
+                d.specularHitDistanceTextureFormat = MTLPixelFormatR16Float;
+            }
             ds = [d newTemporalDenoisedScalerWithDevice:color.device];
             auto fits = [](id<MTLTexture> t, MTLTextureUsage need) { return (t.usage & need) == need; };
             if (!ds || !fits(color, ds.colorTextureUsage) || !fits(depth, ds.depthTextureUsage) ||
@@ -790,9 +838,10 @@ bool EncodeScaler(id scaler, id commandBuffer)
             g_scaler = ds;
             char buf[200];
             std::snprintf(buf, sizeof(buf), "Denoise: denoised scaler %lux%lu -> %lux%lu (color %lu, depth %lu, motion %lu, "
-                          "auto exposure %d)", (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
+                          "auto exposure %d, hit distance %d)", (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
                           (unsigned long)s.outputWidth, (unsigned long)s.outputHeight, (unsigned long)color.pixelFormat,
-                          (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat, g_scalerAuto ? 1 : 0);
+                          (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat, g_scalerAuto ? 1 : 0,
+                          g_scalerHit);
             Logger::Info(buf);
         }
         simd_float4x4 worldToView = matrix_identity_float4x4, viewToClip = matrix_identity_float4x4;
@@ -816,6 +865,12 @@ bool EncodeScaler(id scaler, id commandBuffer)
         ds.normalTexture = g_normal;
         ds.roughnessTexture = g_roughness;
         ds.outputTexture = output;
+        if (g_scalerHit >= 0) { // this frame's, or the last one (an older one beats none: the scaler needs one)
+            ds.specularHitDistanceTexture = g_hit;
+            if (!g_hit) {
+                return false;
+            }
+        }
         ds.exposureTexture = s.exposureTexture;
         ds.preExposure = s.preExposure;
         ds.jitterOffsetX = s.jitterOffsetX;
@@ -834,6 +889,9 @@ bool EncodeScaler(id scaler, id commandBuffer)
             MetalTrace::SaveTexture(commandBuffer, g_specular, "dsin-specular");
             MetalTrace::SaveTexture(commandBuffer, g_normal, "dsin-normal");
             MetalTrace::SaveTexture(commandBuffer, g_roughness, "dsin-roughness");
+            if (g_hit) {
+                MetalTrace::SaveTexture(commandBuffer, g_hit, "dsin-hit");
+            }
         }
         [ds encodeToCommandBuffer:commandBuffer];
         Sharpen(commandBuffer, output);

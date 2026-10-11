@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "FrameGenHud.h"
+
 namespace {
 
 struct Frame {
@@ -116,6 +118,20 @@ double Psnr(const std::vector<float>& a, const std::vector<float>& b)
     return mse == 0 ? 99.0 : 10.0 * std::log10(1.0 / mse);
 }
 
+// Edge detail: the mean absolute Laplacian of a Scene() crop (green), width w.
+double Lap(const std::vector<float>& a, size_t w)
+{
+    const size_t h = a.size() / 3 / w;
+    double sum = 0;
+    for (size_t y = 1; y + 1 < h; ++y) {
+        for (size_t x = 1; x + 1 < w; ++x) {
+            auto g = [&](size_t xx, size_t yy) { return a[(yy * w + xx) * 3 + 1]; };
+            sum += std::fabs(4 * g(x, y) - g(x - 1, y) - g(x + 1, y) - g(x, y - 1) - g(x, y + 1));
+        }
+    }
+    return sum / ((w - 2) * (h - 2));
+}
+
 std::vector<float> Blend(const std::vector<float>& a, const std::vector<float>& b, float t)
 {
     std::vector<float> out(a.size());
@@ -132,6 +148,53 @@ id<MTLTexture> Resize(id<MTLTexture> src, NSUInteger w, NSUInteger h)
     MPSImageBilinearScale* scale = [[MPSImageBilinearScale alloc] initWithDevice:g_dev];
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     [scale encodeToCommandBuffer:cb sourceTexture:src destinationTexture:dst];
+    [cb commit];
+    [cb waitUntilCompleted];
+    return dst;
+}
+
+// The plugin's half-size upsampling with detail from the real frames (FrameGenHud.h upsample_detail).
+id<MTLComputePipelineState> g_detail;
+id<MTLTexture> Detail(id<MTLTexture> gen, id<MTLTexture> cur, id<MTLTexture> curHalf, id<MTLTexture> prev,
+                      id<MTLTexture> prevHalf, id<MTLTexture> motion, float mvx, float mvy, float phase, uint32_t mode,
+                      float tau)
+{
+    if (!g_detail) {
+        NSError* error = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:kHudSource options:nil error:&error];
+        g_detail = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_upsample_detail"] error:&error];
+        if (!g_detail) {
+            fprintf(stderr, "fg_upsample_detail: %s\n", error.localizedDescription.UTF8String);
+            exit(1);
+        }
+    }
+    id<MTLTexture> dst = Texture(MTLPixelFormatRGBA16Float, cur.width, cur.height);
+    struct {
+        simd_float2 mvToOut, outToIn;
+        float phase;
+        uint32_t mode;
+        float tau;
+    } dp = {simd_make_float2(mvx * cur.width / motion.width, mvy * cur.height / motion.height),
+            simd_make_float2(float(motion.width) / cur.width, float(motion.height) / cur.height), phase, mode, tau};
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:g_detail];
+    static id<MTLTexture> zeroUi = [] {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:1
+                                                                                    height:1 mipmapped:NO];
+        td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+        const uint8_t zero = 0;
+        [t replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&zero bytesPerRow:1];
+        return t;
+    }();
+    id<MTLTexture> ts[] = {gen, cur, curHalf, prev, prevHalf, motion, zeroUi, dst};
+    for (int i = 0; i < 8; ++i) {
+        [ce setTexture:ts[i] atIndex:i];
+    }
+    [ce setBytes:&dp length:sizeof(dp) atIndex:0];
+    [ce dispatchThreads:MTLSizeMake(dst.width, dst.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
     return dst;
@@ -327,6 +390,25 @@ int main(int argc, char** argv)
                     add("half output: 1/2 midpoint", Psnr(Scene(Resize(mid, g_ow, g_oh)), scene[k - 2]));
                     add("half output: 3/4 recursive", Psnr(Scene(Resize(q3, g_ow, g_oh)), scene[k - 1]));
                     add("half output: 1/4 recursive", Psnr(Scene(Resize(q1, g_ow, g_oh)), scene[k - 3]));
+                    // Upsampled as the plugin does (Catmull-Rom), and with detail from the real frames k-4 and k.
+                    const struct { id<MTLTexture> g; float phase; size_t ref; const char* name; } gens[] = {
+                        {q1, 0.25f, k - 3, "1/4"}, {mid, 0.5f, k - 2, "1/2"}, {q3, 0.75f, k - 1, "3/4"}};
+                    const struct { uint32_t mode; float tau; const char* name; } variants[] = {
+                        {0, 0, "Catmull-Rom"}, {1, 0.05f, "detail nearest tau 0.05"}, {1, 0.1f, "detail nearest tau 0.1"},
+                        {1, 0.2f, "detail nearest tau 0.2"}, {1, 0.4f, "detail nearest tau 0.4"}, {2, 0.2f, "detail both tau 0.2"},
+                        {2, 100.0f, "detail both ungated"},
+                        {1, 100.0f, "detail nearest ungated"}};
+                    for (const auto& gg : gens) {
+                        for (const auto& v : variants) {
+                            id<MTLTexture> up = Detail(gg.g, color[k], half[k], color[k - 4], half[k - 4], motion[k],
+                                                       seq[k].mvx * 4, seq[k].mvy * 4, gg.phase, v.mode, v.tau);
+                            const auto sc = Scene(up);
+                            add(std::string("half output ") + gg.name + ": " + v.name, Psnr(sc, scene[gg.ref]));
+                            const size_t cw = g_ow * 85 / 100 - g_ow * 15 / 100;
+                            add(std::string("edge detail kept (%) ") + gg.name + ": " + v.name,
+                                100.0 * Lap(sc, cw) / Lap(scene[gg.ref], cw));
+                        }
+                    }
                 }
             }
             g_fw = g_fh = 0;
@@ -345,6 +427,8 @@ int main(int argc, char** argv)
             id<MTLTexture> mid = m.mid.Call(color[k - 4], color[k], depth[k], motion[k], seq[k], 4, 4);
             if (scored) {
                 add("1/2 midpoint", Psnr(Scene(mid), r2));
+                const size_t cw = g_ow * 85 / 100 - g_ow * 15 / 100;
+                add("edge detail kept (%) full output 1/2", 100.0 * Lap(Scene(mid), cw) / Lap(r2, cw));
             }
             if (run(m.q3, mid, color[k], k, 2, 2, &g)) {
                 add("3/4 recursive (mid, k)", Psnr(g, r3));

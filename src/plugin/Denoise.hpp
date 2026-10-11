@@ -17,6 +17,9 @@ bool SetPrepass(bool on);
 
 // MetalFX measures the exposure itself (request "denoiseexposure auto|game"); recreates the denoised scaler.
 void SetAutoExposure(bool on);
+// Specular hit distance for the denoised scaler from RELAX's noisy specular alpha (-1 off; path tracing: which of its
+// two textures). Request "denoisehit off|0|1".
+void SetHitDistance(int index);
 // Camera matrices given to the denoised scaler: "game" (NRD's), "identity", or "rh" (NRD's, view space flipped to -z).
 bool SetCameraMode(const std::string& mode);
 // Read the camera even when off (motion tests).
