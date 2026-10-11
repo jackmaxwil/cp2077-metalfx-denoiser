@@ -384,3 +384,25 @@ Budget today: about 50 ms. Gains below are estimates until step 0 measures them 
 - Measured (path tracing, dynscale scenario, 3456x2160): step 2.75 -> 3.0, slowest of the next 30 frames 45.3 ms
   (scale table path: 111-172 ms); one scaler for the run (1257x786, content properties on); 3x frame 34.6 ms, as with the
   fixed 3x (34.5 ms). Uncapped (DRS maximum 100%), the scaler was native size and the 3x frame 36.5 ms.
+
+## Frame generation: hang, HUD band, vehicles, 4x sharpness (2026-10-10)
+
+- **Hang:** both hangs (4x on from launch, background runs) came with every present of ours unshown (display asleep or
+  window hidden); the game then sat in its inactive-window loop (Sleep(33), no frame, 0x103d9936c), no thread stuck in
+  plugin code, no GPU error. With the window visible, a full cvarbatch with 4x ran through (442 of 443 presents shown).
+  Now frame generation pauses after 90 unshown presents in a row and lets the game present its own frames, and resumes
+  when one of those is shown (METALFX_FG_KEEP_UNSHOWN=1 keeps it on for background tests). Also new: a stall watchdog
+  (pacer stage, queued jobs, slots, event values when the game has not presented for 3 s) and command buffer errors in
+  the log.
+- **HUD band in fast turns:** every pixel near the HUD (3x3 coverage, the 16x mip's +-32 px, the soft copies' offsets,
+  and the scene's motion path, which grows with the turn rate) took the real frame's pixel at p: another moment, and
+  not turned by the camera warp. Now only HUD pixels do; around them the real frame is reprojected to the generated
+  frame's phase, p - (1 - phase) m (in-game frames: the previous frame from the real one this way 46-47 dB, holding the
+  real frame 30 dB), and turned with the rest. HUD pass 0.29 ms (unchanged).
+- **Camera warp per frame:** off when the camera's own turn between the two game frames differs from the mouse's
+  prediction (more than 35% + 0.23 deg: steering, recoil, orbiting cameras) or the camera moves faster than 6 m/s
+  (vehicles). Warp quality varies between runs (warpcheck +4.0 dB in 8 of 8 earlier, -0.57 dB in 6 of 15 now, with a
+  different fit: -0.51 vs -0.82 mrad per count); the player's config has it off for now.
+- **4x sharpness pulse:** the half-size generated frames kept 60% of the real frame's edge detail after bilinear
+  upsampling (in-game frames, Laplacian), so edges pulsed sharp/soft at the rendered rate; the HUD pass now upsamples
+  them with Catmull-Rom: 74%, +3.3 dB.

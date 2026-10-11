@@ -202,9 +202,10 @@ int main(int argc, char** argv)
                 uint32_t debug, hasLow;
                 simd_float2 mvToOut, outToIn;
                 uint32_t warp;
+                float phase;
                 simd_float4x4 P, Pinv;
                 simd_float3x3 M;
-            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u,
+            } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u, 0.5f,
                         matrix_identity_float4x4, matrix_identity_float4x4,
                         simd_matrix3x3(simd_quaternion(0.02f, simd_make_float3(0, 1, 0)))}; // a 1 degree turn
             [ce setBytes:&params length:sizeof(params) atIndex:0];

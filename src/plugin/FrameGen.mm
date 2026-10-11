@@ -135,7 +135,7 @@ struct HudInputs {
 id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerated)
 
 void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, const HudInputs& h, id<MTLTexture> dst,
-                float mvFactor, const Warp::Params* warp = nullptr)
+                float mvFactor, const Warp::Params* warp = nullptr, float phase = 0.5f)
 {
     MetalTrace::Internal internal;
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
@@ -153,11 +153,12 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
         uint32_t debug, hasLow;
         simd_float2 mvToOut, outToIn;
         uint32_t warp;
+        float phase;
         simd_float4x4 P, Pinv;
         simd_float3x3 M;
     } params = {g_hudDebug.load() ? 1u : 0u, h.low ? 1u : 0u,
                 simd_make_float2(h.motion ? h.mvScale[0] * sx * mvFactor : 0.0f, h.motion ? h.mvScale[1] * sy * mvFactor : 0.0f),
-                simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, matrix_identity_float4x4,
+                simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, phase, matrix_identity_float4x4,
                 matrix_identity_float4x4, matrix_identity_float3x3};
     if (warp) {
         params.P = warp->P;
@@ -265,13 +266,27 @@ std::atomic<int> g_logged{0};
 std::mutex g_shownMutex;
 std::vector<double> g_shown;
 
+// Presents in a row the display did not show (display asleep, window hidden or minimized). Frame generation steps aside
+// after 90 of them (under a second) and lets the game present its own frames until one is shown again: in that state,
+// with every present of ours unshown, the game twice stopped rendering for good (its inactive-window loop, Sleep(33)
+// with no frame, 0x103d9936c) about 20 s after loading; without frame generation it carries on.
+// Background tests, whose window is never shown, keep it on with METALFX_FG_KEEP_UNSHOWN=1.
+std::atomic<int> g_unshownRun{0};
+constexpr int kUnshownSuspend = 90;
+const bool g_keepUnshown = [] {
+    const char* env = std::getenv("METALFX_FG_KEEP_UNSHOWN");
+    return env && *env == '1';
+}();
+
 void NoteShown(id<MTLDrawable> d)
 {
     [d addPresentedHandler:^(id<MTLDrawable> drawable) {
         const double t = drawable.presentedTime;
         if (t <= 0) {
+            g_unshownRun.fetch_add(1);
             return; // not shown (dropped)
         }
+        g_unshownRun.store(0);
         std::lock_guard<std::mutex> lock(g_shownMutex);
         g_shown.push_back(t);
         if (g_shown.size() < 241) {
@@ -573,6 +588,9 @@ int g_k = 3; // generated frames shown per rendered frame: 3, or 1
 
 // Pacer statistics, logged every 120 jobs: drawable waits, presents, and how many of them the display showed.
 std::atomic<int> g_pacerShown{0}, g_pacerUnshown{0};
+// Stall diagnosis: where the pacer is, and when the game last presented (a watchdog logs both when the game stops).
+std::atomic<int> g_pacerStage{0}; // 0 waiting for a job, 1 generating, 2 waiting for the frame, 3 drawable, 4 presenting
+std::atomic<double> g_lastGamePresent{0};
 
 struct Job {
     double queued; // CACurrentMediaTime at enqueue
@@ -689,6 +707,7 @@ void Pacer()
         Job job;
         {
             std::unique_lock<std::mutex> lock(g_jobMutex);
+            g_pacerStage.store(0);
             g_jobCv.wait(lock, [] { return !g_jobs.empty(); });
             job = g_jobs.front();
             g_jobs.pop_front();
@@ -699,7 +718,9 @@ void Pacer()
         };
         @autoreleasepool {
             Slot& s = g_slots[job.slot];
+            g_pacerStage.store(1);
             const bool generated = (job.generatedOk || (!job.onGameQueue && Generate(job, s))) && job.interpolate;
+            g_pacerStage.store(2);
             [g_event waitUntilSignaledValue:job.value timeoutMS:1000]; // the game's frame is done: start showing it
             delaySum += CACurrentMediaTime() - job.queued;
             bool first = true, late = false;
@@ -712,7 +733,9 @@ void Pacer()
                     break;
                 }
                 const double t0 = CACurrentMediaTime();
+                g_pacerStage.store(3);
                 id<CAMetalDrawable> d = [job.layer nextDrawable];
+                g_pacerStage.store(4);
                 const double waited = CACurrentMediaTime() - t0;
                 waitSum += waited;
                 waitMax = std::max(waitMax, waited);
@@ -739,9 +762,9 @@ void Pacer()
                 const HudInputs hud{job.hasUi ? s.ui : g_zeroUi, job.hasUi ? s.low : nil, s.motion,
                                     {job.mvScale[0], job.mvScale[1]}};
                 if (i < 3) {
-                    RestoreHud(cb, s.gen[i], s.real, hud, d.texture, 1.0f, warp ? &wp : nullptr);
+                    RestoreHud(cb, s.gen[i], s.real, hud, d.texture, 1.0f, warp ? &wp : nullptr, (i + 1) / 4.0f);
                 } else if (warp) {
-                    RestoreHud(cb, s.real, s.real, hud, d.texture, 1.0f, &wp);
+                    RestoreHud(cb, s.real, s.real, hud, d.texture, 1.0f, &wp, 1.0f);
                 } else {
                     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
                     [blit copyFromTexture:s.real toTexture:d.texture];
@@ -825,6 +848,32 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
         g_event = [dev newSharedEvent];
         g_zeroUi = Make(dev, MTLPixelFormatR8Unorm, 1, 1, MTLTextureUsageShaderRead);
         std::thread(Pacer).detach();
+        std::thread([] { // stall watchdog: one snapshot per stall of over 3 s while frame generation is on
+            bool reported = false;
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                const double last = g_lastGamePresent.load(), now = CACurrentMediaTime();
+                if (!g_on.load() || last <= 0 || now - last < 3.0) {
+                    reported = false;
+                    continue;
+                }
+                if (std::exchange(reported, true)) {
+                    continue;
+                }
+                size_t queued;
+                {
+                    std::lock_guard<std::mutex> lock(g_jobMutex);
+                    queued = g_jobs.size();
+                }
+                char buf[300];
+                std::snprintf(buf, sizeof(buf), "FrameGen: the game has not presented for %.1f s; pacer stage %d, %zu jobs "
+                              "queued, slots free %d%d%d, event %llu of %llu signaled, k %d", now - last,
+                              g_pacerStage.load(), queued, g_slots[0].free.load(), g_slots[1].free.load(),
+                              g_slots[2].free.load(), (unsigned long long)g_event.signaledValue,
+                              (unsigned long long)g_eventValue, g_k);
+                Logger::Warn(buf);
+            }
+        }).detach();
     }
     const MTLTextureUsage rw = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
     const NSUInteger hw = tex.width / 2, hh = tex.height / 2;
@@ -983,7 +1032,25 @@ bool Present(id commandBuffer, id drawable, const std::function<void(id)>& prese
                       layer.wantsExtendedDynamicRangeContent ? 1 : 0);
         Logger::Info(buf);
     }
-    if (!Enabled() || !layer || !tex) {
+    static bool suspended = false; // render thread only
+    g_lastGamePresent.store(CACurrentMediaTime());
+    const bool unseen = !g_keepUnshown && g_unshownRun.load() >= kUnshownSuspend;
+    if (unseen != suspended) {
+        suspended = unseen;
+        Logger::Info(unseen ? "FrameGen: nothing shown on the display for 90 presents: paused, the game presents"
+                            : "FrameGen: the display shows frames again: resumed");
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_havePrev = g_mfPrev = false;
+        g_reset = true;
+    }
+    if (suspended && d) { // the game's own frame: when one is shown, frame generation resumes
+        [d addPresentedHandler:^(id<MTLDrawable> shown) {
+          if (shown.presentedTime > 0) {
+              g_unshownRun.store(0);
+          }
+        }];
+    }
+    if (!Enabled() || suspended || !layer || !tex) {
         if (g_overlay) {
             std::lock_guard<std::mutex> lock(g_mutex);
             RemoveOverlay(); // the game's own presents show again

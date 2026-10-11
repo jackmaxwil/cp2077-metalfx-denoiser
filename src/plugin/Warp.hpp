@@ -9,7 +9,9 @@
 // smoothly as the input itself (the target input advances with display time, by the mouse events' own timestamps).
 // Rotation only (yaw about world up, pitch about the camera's right axis), at most 4 degrees; the HUD stays put; edges
 // the turn reveals repeat border pixels. Calibrated live: the camera's turn between frames against the game's mouse
-// counts between its input reads; off while the fit is poor (vehicles, scripted cameras, cutscenes, menus).
+// counts between its input reads; off while the fit is poor (vehicles, scripted cameras, cutscenes, menus), and per frame
+// whenever the camera's own turn between the two game frames is not the one the mouse predicts (steering, recoil, an
+// orbiting third-person camera) or the camera moves faster than running (vehicles: their motion is not a rotation).
 namespace Warp {
 
 void SetEnabled(bool on);
@@ -21,6 +23,7 @@ struct View {
     double read = 0;      // the present call (host time)
     double x = 0, y = 0;  // cumulative mouse counts the game had taken
     double yaw = 0, pitch = 0;
+    simd_float3 pos;      // camera position (world, metres)
     simd_float3x3 R;      // view to world
     simd_float4x4 P;      // view to clip
 };

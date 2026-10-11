@@ -1823,6 +1823,14 @@ void H_cbCommit(id self, SEL sel)
         Emit(line + "}");
         s_cbGroups.erase((__bridge const void*)self);
     }
+    // GPU errors (timeouts, page faults) of any command buffer, the game's or ours: the first 20 are logged.
+    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      static std::atomic<int> logged{0};
+      if (cb.status == MTLCommandBufferStatusError && logged.fetch_add(1) < 20) {
+          Logger::Error(std::string("Metal: command buffer error") + (cb.label ? " (" + std::string(cb.label.UTF8String) + ")" : "") +
+                        (t_internal ? "" : "") + ": " + std::string(cb.error.description.UTF8String ?: "?"));
+      }
+    }];
     if (s_perfActive.load(std::memory_order_relaxed)) {
         const uint64_t frame = s_frame.load() + 1; // the frame being encoded
         std::shared_ptr<Perf> window;

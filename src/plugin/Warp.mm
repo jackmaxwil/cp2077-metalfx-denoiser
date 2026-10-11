@@ -35,7 +35,9 @@ std::deque<double> g_leads;
 double g_lead = 0.05;
 // Log counters.
 int g_frames = 0, g_warped = 0, g_captures = 0, g_noCamera = 0;
-int g_skip[4] = {}; // shown frames not warped: not calibrated, no view, no input at the target time, turn too small
+// Shown frames not warped: not calibrated, no view, no input at the target time, turn too small, camera turned by
+// something other than the mouse, camera moving fast.
+int g_skip[6] = {};
 double g_angleSum = 0;
 
 double Wrap(double a)
@@ -118,13 +120,14 @@ View Capture()
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (++g_captures % 240 == 0) {
-            char buf[300];
+            char buf[360];
             std::snprintf(buf, sizeof(buf), "Warp: %s (fit R2 %.2f over %zu frame pairs, %.3f / %.3f mrad per count), "
                           "input lead %.1f ms, %d of the last 240 frames without a new camera, %d shown frames warped "
-                          "(mean turn %.2f deg); not warped: %d uncalibrated, %d no view, %d no input, %d no turn",
+                          "(mean turn %.2f deg); not warped: %d uncalibrated, %d no view, %d no input, %d no turn, %d not the mouse, "
+                          "%d moving fast",
                           g_cal ? "on" : "waiting for a fit", g_r2, g_pairs.size(), g_kx * 1000, g_ky * 1000,
                           g_lead * 1000, g_noCamera, g_warped, g_warped ? g_angleSum / g_warped * 180 / M_PI : 0.0,
-                          g_skip[0], g_skip[1], g_skip[2], g_skip[3]);
+                          g_skip[0], g_skip[1], g_skip[2], g_skip[3], g_skip[4], g_skip[5]);
             Logger::Info(buf);
             g_noCamera = g_warped = 0;
             std::fill(std::begin(g_skip), std::end(g_skip), 0);
@@ -143,6 +146,7 @@ View Capture()
     v.R = simd_matrix(simd_make_float3(v2w[0], v2w[1], v2w[2]), simd_make_float3(v2w[4], v2w[5], v2w[6]),
                       simd_make_float3(v2w[8], v2w[9], v2w[10]));
     std::memcpy(&v.P, p, 64);
+    v.pos = simd_make_float3(v2w[12], v2w[13], v2w[14]);
     const simd_float3 fwd = v.R.columns[2]; // gViewToWorld: column 2 forward, column 1 up (measured)
     v.yaw = std::atan2(fwd.y, fwd.x);
     v.pitch = Pitch(fwd);
@@ -193,6 +197,17 @@ bool Make(const View& prev, const View& cur, double phase, double shown, Params&
         kx = g_kx;
         ky = g_ky;
         lead = g_lead;
+    }
+    // The camera's own turn between the two game frames against the mouse's prediction: steering, recoil, scripted or
+    // orbiting cameras turn it otherwise, and a warp by the mouse would turn the image wrong. Fast camera motion
+    // (vehicles) is translation the warp cannot show.
+    const double span = cur.read - prev.read;
+    const double actual = Wrap(cur.yaw - prev.yaw), predicted = kx * (cur.x - prev.x);
+    const double speed = span > 0 ? simd_length(cur.pos - prev.pos) / span : 0;
+    if (std::abs(actual - predicted) > 0.35 * std::abs(predicted) + 0.004 || speed > 6.0) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ++g_skip[speed > 6.0 ? 5 : 4];
+        return false;
     }
     double x, y;
     if (!Input::Counts(shown - lead, x, y)) {
