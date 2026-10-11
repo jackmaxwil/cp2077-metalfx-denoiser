@@ -19,6 +19,7 @@ texture_lod_bias = 0.0
 
 # Sharpening after the Apple denoiser, 0 (off) to 1 (strongest): contrast adaptive (AMD's RCAS), against the softness
 # of the 3x upscale. The game's own sharpening setting does not apply with the denoiser. Also in ModMenu.
+# With path tracing it also sharpens the denoiser's leftover noise: 0.4 measured 2 dB more still-image flicker than 0.
 sharpness = 0.0
 
 # Render scale of ultra_performance: 3.0 (the engine's hidden "Ultra Performance") down to 2.0. 2.5 renders 1382x864 for

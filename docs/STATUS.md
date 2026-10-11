@@ -406,3 +406,17 @@ Budget today: about 50 ms. Gains below are estimates until step 0 measures them 
 - **4x sharpness pulse:** the half-size generated frames kept 60% of the real frame's edge detail after bilinear
   upsampling (in-game frames, Laplacian), so edges pulsed sharp/soft at the rendered rate; the HUD pass now upsamples
   them with Catmull-Rom: 74%, +3.3 dB.
+
+## Still-image noise flicker with the Apple denoiser (2026-10-10)
+
+Measured with RED4ext's `flicker` scenario: path tracing, render scale 3x, time frozen, frame generation off; three
+captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B; PSNR between consecutive captures
+(higher = steadier).
+- Sharpening 0.4: 42.5 / 41.8 / 41.9 / 42.7 dB (mean 42.2); sharpening 0: 43.4 / 45.5 / 43.8 (44.2). RCAS sharpens the
+  denoiser's leftover noise: 2 dB more flicker, 21% more change per frame. The player's config is now at 0.
+- Render scale 2.5 instead of 3 (sharpening 0): 45.4 against 43.0 dB, for about 9 ms more per frame.
+- MetalFX auto exposure (request "denoiseexposure auto", the game passes pre-exposure 1 and no exposure texture): 42.5
+  against 43.3 dB, no gain. Not used.
+- Background test runs froze when the user's windows covered the game's: the game stops rendering for a fully occluded
+  window (its occlusion handler and an occlusionState poll). RED4ext's background mode now reports the window visible;
+  the earlier "4x hang" (two background runs) was this, not frame generation.

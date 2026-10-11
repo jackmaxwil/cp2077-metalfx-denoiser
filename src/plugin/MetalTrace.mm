@@ -970,6 +970,8 @@ void PollRequests(uint64_t frame)
         FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
         FrameGen::SaveSequence(std::atoi(name.c_str()));
+    } else if (kind == "denoiseexposure") {
+        Denoise::SetAutoExposure(name == "auto");
     } else if (kind == "denoiseprepass") {
         Denoise::SetPrepass(name == "on");
     } else if (kind == "denoisecam") {

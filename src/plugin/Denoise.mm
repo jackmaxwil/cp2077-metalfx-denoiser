@@ -143,6 +143,10 @@ id<MTLTexture> g_sharpSrc; // the scaler's output, copied for RCAS to read
 std::atomic<float> g_sharpness{0.0f};
 id<MTLTexture> g_diffuse, g_specular, g_normal, g_roughness; // guide textures, input size
 id g_scaler;                                                  // id<MTLFXTemporalDenoisedScaler>
+// Auto exposure (request "denoiseexposure auto|game"): the game gives MetalFX pre-exposure 1 and no exposure texture,
+// so the denoiser sees raw HDR lighting; with auto exposure it measures the exposure itself. Recreates the scaler.
+std::atomic<bool> g_autoExposure{false};
+bool g_scalerAuto = false;
 
 NSString* const kSource = @R"(
 #include <metal_stdlib>
@@ -445,6 +449,12 @@ bool SetMode(const std::string& mode)
     g_logged.store(0);
     Logger::Info("Denoise: mode " + mode);
     return true;
+}
+
+void SetAutoExposure(bool on)
+{
+    g_autoExposure.store(on);
+    Logger::Info(std::string("Denoise: auto exposure ") + (on ? "on" : "off"));
 }
 
 bool SetPrepass(bool on)
@@ -750,7 +760,8 @@ bool EncodeScaler(id scaler, id commandBuffer)
         id<MTLFXTemporalDenoisedScaler> ds = g_scaler;
         if (!ds || ds.inputWidth != s.inputWidth || ds.inputHeight != s.inputHeight ||
             ds.outputWidth != s.outputWidth || ds.outputHeight != s.outputHeight ||
-            ds.colorTextureFormat != color.pixelFormat || ds.motionTextureFormat != motion.pixelFormat) {
+            ds.colorTextureFormat != color.pixelFormat || ds.motionTextureFormat != motion.pixelFormat ||
+            g_scalerAuto != g_autoExposure.load()) {
             MTLFXTemporalDenoisedScalerDescriptor* d = [MTLFXTemporalDenoisedScalerDescriptor new];
             d.colorTextureFormat = color.pixelFormat;
             d.depthTextureFormat = depth.pixelFormat;
@@ -765,6 +776,8 @@ bool EncodeScaler(id scaler, id commandBuffer)
             d.outputWidth = s.outputWidth;
             d.outputHeight = s.outputHeight;
             d.requiresSynchronousInitialization = YES;
+            d.autoExposureEnabled = g_autoExposure.load();
+            g_scalerAuto = d.autoExposureEnabled;
             ds = [d newTemporalDenoisedScalerWithDevice:color.device];
             auto fits = [](id<MTLTexture> t, MTLTextureUsage need) { return (t.usage & need) == need; };
             if (!ds || !fits(color, ds.colorTextureUsage) || !fits(depth, ds.depthTextureUsage) ||
@@ -776,10 +789,10 @@ bool EncodeScaler(id scaler, id commandBuffer)
             }
             g_scaler = ds;
             char buf[200];
-            std::snprintf(buf, sizeof(buf), "Denoise: denoised scaler %lux%lu -> %lux%lu (color %lu, depth %lu, motion %lu)",
-                          (unsigned long)s.inputWidth, (unsigned long)s.inputHeight, (unsigned long)s.outputWidth,
-                          (unsigned long)s.outputHeight, (unsigned long)color.pixelFormat,
-                          (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat);
+            std::snprintf(buf, sizeof(buf), "Denoise: denoised scaler %lux%lu -> %lux%lu (color %lu, depth %lu, motion %lu, "
+                          "auto exposure %d)", (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
+                          (unsigned long)s.outputWidth, (unsigned long)s.outputHeight, (unsigned long)color.pixelFormat,
+                          (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat, g_scalerAuto ? 1 : 0);
             Logger::Info(buf);
         }
         simd_float4x4 worldToView = matrix_identity_float4x4, viewToClip = matrix_identity_float4x4;
