@@ -4,7 +4,9 @@
 // docs/CONFIG_VAR_AUDIT.md): "ConfigVar/<group>/<name>" for the object and "ConfigVar/@bool|int|float" for the value
 // types' vtables, each hashed with FNV1a32. Before touching a variable the object is checked in memory: its name and
 // group pointers (+0x8, +0x10) must point to the expected strings and its vtable must be one of the three types.
-// Value: +0x2c (bool: 1 byte; int, float: 4 bytes). Nothing is written when any check fails.
+// Value: int and float at +0x2c (4 bytes; min, max, default at +0x30, +0x34, +0x38); bool at +0x29 (1 byte; +0x2c is
+// its default, as the bool type's getter and setter and every engine reader show, e.g. DRS::Update's ldrb [var, #0x29]).
+// Nothing is written when any check fails.
 
 #include "ConfigVars.hpp"
 #include "Logger.hpp"
@@ -87,7 +89,7 @@ bool Lookup(const std::string& path, Var& out, std::string& why)
 std::string ValueString(const Var& v)
 {
     switch (v.type) {
-    case Type::Bool: return v.object[0x2C] ? "true" : "false";
+    case Type::Bool: return v.object[0x29] ? "true" : "false";
     case Type::Int: return std::to_string(*reinterpret_cast<const int32_t*>(v.object + 0x2C));
     case Type::Float: return std::to_string(*reinterpret_cast<const float*>(v.object + 0x2C));
     default: return "?";
@@ -114,7 +116,7 @@ std::string Apply(const std::string& request)
         const std::string text = request.substr(eq + 1);
         switch (v.type) {
         case Type::Bool:
-            v.object[0x2C] = (text == "true" || text == "1") ? 1 : 0;
+            v.object[0x29] = (text == "true" || text == "1") ? 1 : 0;
             break;
         case Type::Int: {
             const auto value = static_cast<int32_t>(std::strtoll(text.c_str(), nullptr, 0));

@@ -1,0 +1,6 @@
+# Bool config variables after the +0x29 fix (2026-10-10): each must now change the image against its baseline
+# (earlier, at +0x2c, both measured no change). Game's MetalFX path (no RTBENCH_DENOISE), so the engine's CAS runs.
+# CP_RESOLUTION=3456x2160 RTBENCH_PRESET=Performance@3 RTBENCH_CVARS=MFX/OverrideEnable=1,MFX/Quality=4 \
+#   RTBENCH_SCENARIO=cvarbatch RTBENCH_EXPERIMENTS=../cp2077-metalfx-denoiser/experiments/bool-check.txt tools/rtbench pt
+Editor/MipBias/EnableCustomMipBias=1;Editor/MipBias/ForceCustomMipBias=0
+Developer/FeatureToggles/ConstrastAdaptiveSharpening=0

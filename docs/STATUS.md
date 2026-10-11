@@ -354,3 +354,17 @@ Budget today: about 50 ms. Gains below are estimates until step 0 measures them 
    display smoothness (it does not improve responsiveness).
 6. **Keep it shippable.** Long-session soak (memory, stutter), the skin/motion/turn regression scenarios after each
    change, ModMenu entries for the new options, fail-closed defaults.
+
+## Bool config variables (2026-10-10)
+
+- **Fixed: bool config variables were read and written at the wrong byte.** The live value is at +0x29 (+0x2c is the
+  default; DRS_RECON.md §3.3). Every earlier bool experiment changed only the default and measured nothing: the CAS
+  toggle, `MFX/OverrideSharpness`, `FSR2/EnableHalton`, the FeatureToggles ("each within noise"), `SkipStaticMeshes`,
+  `EnableNRD`. Those results need repeating. Int and float variables were right.
+- Check (`experiments/bool-check.txt`, path tracing at 3x, game MetalFX): screenshot PSNR against the baseline is
+  36.5 dB for `EnableCustomMipBias=1` with bias 0, and 37.9 dB for CAS off, against 39.8 dB for two identical baselines
+  (noise floor).
+- Background runs with 4x frame generation on from the start (the installed config) hung twice after the load. No
+  thread was stuck in plugin code. The game sat in its inactive-window loop (`0x103d9936c`: Sleep(33) and no frame),
+  right after the pacer reported 480 presents with 0 shown. Not yet understood. Background tests set frame generation
+  through requests or keep it off.
