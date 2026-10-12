@@ -484,3 +484,14 @@ captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B;
 - **GPU address fault** (game exits) with the transparency step and detail both on, at the first denoised frame: run
   bisected (reactive mask off: clean; frame generation's transparency step off: clean); the steps sampled at positions
   made from non-finite motion vectors (sky). Both steps skip non-finite motion vectors now: clean with everything on.
+
+## Correction: the game's MetalFX sharpening does reach the image (2026-10-11)
+
+- The flicker scenario's "CAS has no effect" captured the upscaler's output, before the game's post-processing, where
+  that sharpening runs. Measured on the presented image instead (4x frame generation's drawables, scenario "sharp",
+  same frozen view): edge energy 1.51 at MetalFX_Sharpness 0 against 1.70 at 0.5 (+13%), while the upscaler's output
+  is the same (3.36 / 3.35). So the game sharpens the Apple denoiser's output by its menu setting; the player saw halos
+  over a soft image ("too much sharpening", "denoiser too blurry").
+- Player settings now: MetalFX Sharpness 0 (game menu), output 3456x2160 instead of 2992x1870 (which the display then
+  stretched to its 3456 pixels: blur on top of the upscale), ultra_scale 2.25 (1536x960, about the render cost of
+  2992x1870 at 2.0). The plugin's own sharpening (ModMenu slider) stays 0; raise it a little for a crisper image.

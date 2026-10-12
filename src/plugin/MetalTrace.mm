@@ -532,6 +532,11 @@ std::atomic<uint64_t> s_fillSkipMin{0}, s_fillSkipped{0};
 std::atomic<bool> s_skipRtClears{false};
 constexpr uint64_t kRtClearsLo = 0x100fe2e54, kRtClearsHi = 0x100fe5f60, kRtClearsMin = 8u << 20;
 std::atomic<uint64_t> s_rtClearsSkipped{0};
+// The buffers whose clear went through once since they were made: a new buffer holds garbage, and skipping its first
+// clear faulted the GPU on the first frame (a skip from launch, and after the game reallocates them: render size or
+// scale changes). Keyed by object, GPU address and length (a new buffer reusing all three is not cleared: accepted).
+std::mutex s_rtClearedMutex;
+std::set<std::tuple<const void*, uint64_t, uint64_t>> s_rtCleared;
 std::shared_mutex s_skipMutex;
 std::unordered_set<const void*> s_skipPipes;
 std::atomic<uint64_t> s_skipped{0};
@@ -2869,7 +2874,13 @@ void H_bFill(id self, SEL sel, id buf, NSRange range, uint8_t value)
         }
         if (s_skipRtClears.load(std::memory_order_relaxed) && value == 0 && range.length >= kRtClearsMin) {
             const uint64_t site = GameOffset(__builtin_return_address(0));
+            bool first = false;
             if (site >= kRtClearsLo && site < kRtClearsHi && GameUuidOk()) {
+                id<MTLBuffer> b = buf;
+                std::lock_guard<std::mutex> lock(s_rtClearedMutex);
+                first = s_rtCleared.insert({(const void*)b, b.gpuAddress, b.length}).second;
+            }
+            if (!first && site >= kRtClearsLo && site < kRtClearsHi && GameUuidOk()) {
                 if (s_rtClearsSkipped.fetch_add(1, std::memory_order_relaxed) == 0) {
                     Logger::Info("Metal trace: path tracing's per-frame clears of 8 MiB and more are skipped");
                 }

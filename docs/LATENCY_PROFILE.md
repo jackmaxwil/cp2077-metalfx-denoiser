@@ -85,7 +85,11 @@ generation): wavefront path tracing 6.0 ms, RTXDI 3.7, the Apple denoiser 1.8 + 
   skips nothing): the clear pass (1.5-1.7 ms) is gone from the per-encoder profile (game frame 30.7 -> 28.6 ms in the
   clean pair); same-view captures kept vs skipped 33.3-33.7 dB, as kept vs kept seconds apart (33.7); a 6-minute soak
   with turns and time running logged no GPU errors and showed a normal image.
-- The player's config now uses 2x frame generation and skip_rt_clears.
+- **Crash fixed:** with the skip on from launch, the GPU faulted on the first frame (the game exited): a new buffer holds
+  garbage and that first clear initializes it (the soak had started with the clears kept). Now each buffer's first
+  clear goes through (keyed by object, GPU address and length; reallocations after a render size or scale change are
+  new buffers); the same launch-with-skip run was then clean. The player's config keeps skip_rt_clears off until a run
+  with render scale changes is clean too.
 
 ## Done
 
