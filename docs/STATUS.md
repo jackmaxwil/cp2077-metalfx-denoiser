@@ -447,3 +447,26 @@ captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B;
 - Tests: background runs are muted (cp-run sets MasterVolume 0 and MuteInBackground; settings restored). Shot captures
   are written on their own serial queue (at utility priority 3 of 24 were written in two minutes) without the alpha
   image. cp-gate passes again (the validator took the scale table in __TEXT,__const for a function).
+
+## Exhaust and smoke: reactive mask from the transparencies (2026-10-11)
+
+- **Cause of the "distortion around the exhaust":** the game composites its transparencies (exhaust and tyre smoke,
+  steam plumes, glass, light glows) into the scene color with no motion vectors of their own and gives MetalFX no
+  reactive mask, so the denoised scaler drags old smoke along the road's motion: smoke with a hard horizontal smear
+  edge (docs/img/reactive-exhaust.png, left; the save's car scene, time running).
+- **Where:** a dump at the car scene (path tracing, Performance at 2.75) shows six render passes in one command buffer
+  with color attachments RGBA16Float (render size) and R8Unorm in any slots (the game leaves gaps) and a Depth32Float
+  depth, all on one scene texture: clouds, then the distant plumes, then the car's exhaust and lights.
+- **Mask:** the scene is copied before the first of them (before the game's render encoder is made) and after the last
+  (at the command buffer's next encoder or commit: copying from the endEncoding hook asserted "A command encoder is
+  already encoding", the hooks nest); per pixel, the largest channel change relative to the brighter value, times 2,
+  minus 0.04; given to the denoised scaler as reactiveMaskTexture (R8Unorm). Request "denoisereactive on|off|save"; on
+  by default. Result: the smoke edge is gone (right half of the image); the mask also covers glass and light bars.
+- Two failures on the way, both fixed before the next run: encoding the copy with the denoiser's lock held deadlocked
+  (the copy's own encoder hooks take it; GPU timeout), and the copy from inside endEncoding asserted.
+- **Generated frames (4x):** the mask goes to frame generation too: in masked pixels, where the two real frames agree
+  better unmoved than moved by the motion vector (smoke that stays on screen with the car), the HUD pass blends them in
+  place instead of the interpolator's result. Request "fgreactive on|off". Not yet measured in game.
+- **Test plumbing:** the plugin read scenario requests only outside its timing windows and one per poll, and a second
+  "shot" replaced the first: requests ran seconds late and in bursts. Now all waiting requests run at once, also
+  during timing windows, and shots queue.

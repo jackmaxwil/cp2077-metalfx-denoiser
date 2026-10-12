@@ -16,6 +16,8 @@ int Multiplier();
 void SetGenerateOnGameQueue(bool on);
 // Tests: 4x's detail from the real frames on its half-size generated frames (request "fgdetail on|off"; on by default).
 void SetDetail(bool on);
+// Tests: 4x's in-place blend of transparencies (request "fgreactive on|off"; on by default).
+void SetReactive(bool on);
 // Tests (request "warpeval <n>", 4x with camera warp): the next n game frames shown, as wevNN-real and (when warped)
 // wevNN-warped; scripts/warpeval_report.py scores warped N and plain N against N+1.
 void WarpEval(int frames);

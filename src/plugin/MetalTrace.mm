@@ -58,6 +58,7 @@
 #include <set>
 #include <cstdlib>
 #include <atomic>
+#include <deque>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -475,7 +476,7 @@ std::string s_traceName;
 std::string s_dumpName;
 std::atomic<int> s_motion{0}; // "motion" (MotionTick): 0 idle, 1 armed, 2 moving, 3 settling
 std::string s_motionName;
-std::string s_shotName; // "shot <name>": the upscaler output of the next frame, as <name>-..-shot (guarded by s_capMutex)
+std::deque<std::string> s_shotNames; // "shot <name>": the upscaler output of a next frame each, as <name>-..-shot (s_capMutex)
 std::atomic<uint64_t> s_frame{0};
 std::atomic<bool> s_sawCbPresent{false};
 
@@ -876,11 +877,11 @@ void StepBatch(uint64_t frame)
     }
 }
 
-void PollRequests(uint64_t frame)
+bool PollRequests(uint64_t frame) // one request; false when there is none
 {
     DIR* d = opendir(s_dir.c_str());
     if (!d) {
-        return;
+        return false;
     }
     std::vector<std::string> reqs;
     while (dirent* e = readdir(d)) {
@@ -890,7 +891,7 @@ void PollRequests(uint64_t frame)
     }
     closedir(d);
     if (reqs.empty()) {
-        return;
+        return false;
     }
     std::sort(reqs.begin(), reqs.end());
     const std::string path = s_dir + "/" + reqs[0];
@@ -966,12 +967,16 @@ void PollRequests(uint64_t frame)
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgqueue") {
         FrameGen::SetGenerateOnGameQueue(name == "game");
+    } else if (kind == "fgreactive") {
+        FrameGen::SetReactive(name == "on");
     } else if (kind == "fgdetail") {
         FrameGen::SetDetail(name == "on");
     } else if (kind == "fgmult") {
         FrameGen::SetMultiplier(std::atoi(name.c_str()));
     } else if (kind == "fgseq") {
         FrameGen::SaveSequence(std::atoi(name.c_str()));
+    } else if (kind == "denoisereactive") {
+        Denoise::SetReactive(name);
     } else if (kind == "denoisehit") {
         Denoise::SetHitDistance(name == "off" ? -1 : std::atoi(name.c_str()));
     } else if (kind == "denoiseexposure") {
@@ -984,7 +989,7 @@ void PollRequests(uint64_t frame)
         }
     } else if (kind == "shot" && !name.empty()) {
         std::lock_guard<std::mutex> lock(s_capMutex);
-        s_shotName = name;
+        s_shotNames.push_back(name);
     } else if (kind == "motion" && !name.empty()) {
         Denoise::SetWatch(true);
         std::lock_guard<std::mutex> lock(s_capMutex);
@@ -996,6 +1001,7 @@ void PollRequests(uint64_t frame)
     } else {
         Logger::Warn("Metal trace: unknown request " + reqs[0]);
     }
+    return true;
 }
 
 void StopCapture()
@@ -1152,8 +1158,14 @@ void OnPresent(bool fromCommandBuffer)
                              WritePerf(window);
                            });
         }
-    } else if (s_traceState.load() == TraceState::Idle && frame % 15 == 0) {
-        PollRequests(frame);
+    }
+    // Requests also during a timing window (perf: 120 frames every log_performance frames; skipping them there held
+    // scenario requests back by seconds and ran them in bursts).
+    if (s_traceState.load() == TraceState::Idle && frame % 15 == 0) {
+        // All waiting requests (a scenario often sends a few at once; one per poll ran them seconds late), but
+        // none after one that starts a trace.
+        for (int i = 0; i < 16 && s_traceState.load() == TraceState::Idle && PollRequests(frame); ++i) {
+        }
     }
     StepBatch(frame);
     if (frame == 1) {
@@ -1661,6 +1673,7 @@ id ProfCompute(id cb, NSUInteger type, int idx)
 
 id H_cbCompute(id self, SEL sel)
 {
+    Denoise::BeforeEncoder(self);
     const int idx = ProfTake();
     id enc = idx >= 0 ? ProfCompute(self, MTLDispatchTypeSerial, idx) : ORIG(o_cbCompute, Id0, self)(self, sel);
     t_profIdx = idx;
@@ -1671,6 +1684,7 @@ id H_cbCompute(id self, SEL sel)
 
 id H_cbComputeType(id self, SEL sel, NSUInteger type)
 {
+    Denoise::BeforeEncoder(self);
     const int idx = ProfTake();
     id enc = idx >= 0 ? ProfCompute(self, type, idx) : ORIG(o_cbComputeType, IdU, self)(self, sel, type);
     t_profIdx = idx;
@@ -1711,6 +1725,7 @@ template <class Desc> struct ProfAttach {
 
 id H_cbComputeDesc(id self, SEL sel, id desc)
 {
+    Denoise::BeforeEncoder(self);
     ProfAttach<MTLComputePassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbComputeDesc, Id1, self)(self, sel, desc);
     t_profIdx = prof.idx;
@@ -1722,11 +1737,15 @@ id H_cbComputeDesc(id self, SEL sel, id desc)
 
 id H_cbRender(id self, SEL sel, id desc)
 {
+    if (Denoise::Active()) {
+        Denoise::BeforeRenderPass(self, desc);
+    }
     ProfAttach<MTLRenderPassDescriptor> prof(desc, true);
     id enc = ORIG(o_cbRender, Id1, self)(self, sel, desc);
     t_profIdx = prof.idx;
     if (Denoise::Active()) {
         Denoise::RenderPass(desc);
+        Denoise::NoteRenderEncoder(enc);
     }
     FrameGen::RenderPass(desc);
     BeginEncoder(self, enc, 'r', -1, desc);
@@ -1736,6 +1755,7 @@ id H_cbRender(id self, SEL sel, id desc)
 
 id H_cbParallel(id self, SEL sel, id desc)
 {
+    Denoise::BeforeEncoder(self);
     ProfAttach<MTLRenderPassDescriptor> prof(desc, true);
     id enc = ORIG(o_cbParallel, Id1, self)(self, sel, desc);
     t_profIdx = prof.idx;
@@ -1765,6 +1785,7 @@ id H_parSub(id self, SEL sel)
 
 id H_cbBlit(id self, SEL sel)
 {
+    Denoise::BeforeEncoder(self);
     const int idx = ProfTake();
     id enc;
     if (idx >= 0) {
@@ -1784,6 +1805,7 @@ id H_cbBlit(id self, SEL sel)
 
 id H_cbBlitDesc(id self, SEL sel, id desc)
 {
+    Denoise::BeforeEncoder(self);
     ProfAttach<MTLBlitPassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbBlitDesc, Id1, self)(self, sel, desc);
     t_profIdx = prof.idx;
@@ -1794,6 +1816,7 @@ id H_cbBlitDesc(id self, SEL sel, id desc)
 
 id H_cbAccel(id self, SEL sel)
 {
+    Denoise::BeforeEncoder(self);
     const int idx = ProfTake();
     id enc;
     if (idx >= 0) {
@@ -1814,6 +1837,7 @@ id H_cbAccel(id self, SEL sel)
 
 id H_cbAccelDesc(id self, SEL sel, id desc)
 {
+    Denoise::BeforeEncoder(self);
     ProfAttach<MTLAccelerationStructurePassDescriptor> prof(desc, false);
     id enc = ORIG(o_cbAccelDesc, Id1, self)(self, sel, desc);
     t_profIdx = prof.idx;
@@ -1824,6 +1848,7 @@ id H_cbAccelDesc(id self, SEL sel, id desc)
 
 void H_cbCommit(id self, SEL sel)
 {
+    Denoise::BeforeEncoder(self);
     if (s_capture.load(std::memory_order_relaxed)) {
         std::lock_guard<std::mutex> lock(s_capMutex);
         std::string line = "{\"e\":\"commit\"," + SeqField() + ",\"cb\":" + P((__bridge const void*)self);
@@ -2523,6 +2548,9 @@ void H_endEnc(id self, SEL sel)
         }
     }
     ORIG(o_endEnc, V0, self)(self, sel);
+    if (Denoise::Hooked()) {
+        Denoise::AfterEndEncoding(self);
+    }
     if (dumpCb) {
         Logger::Info("Metal trace: dump encoder with " + std::to_string(dumpTargets.size()) + " render targets, " +
                      std::to_string(dumpDispatchTex.size()) + " dispatch textures");
@@ -2816,12 +2844,12 @@ void H_fxTemporalEncode(id self, SEL sel, id cb)
     FrameGen::AfterScaler(self, cb);
     {
         std::lock_guard<std::mutex> lock(s_capMutex);
-        if (!s_shotName.empty()) {
+        if (!s_shotNames.empty()) {
             const std::string keep = s_dumpName;
-            s_dumpName = s_shotName;
+            s_dumpName = s_shotNames.front();
+            s_shotNames.pop_front();
             DumpTexture(cb, [(id<MTLFXTemporalScaler>)self outputTexture], "shot");
             s_dumpName = keep;
-            s_shotName.clear();
         }
     }
     if (s_motion.load(std::memory_order_relaxed)) {

@@ -35,8 +35,9 @@ kernel void fg_ui_copy(texture2d<float, access::read> src [[texture(0)]], textur
 // warp != 0: the scene is turned (camera warp, Warp.mm): each output pixel samples gen where its direction lies in gen's
 // view (M: new view to gen's view; P: view to clip); HUD pixels stay put.
 // detail: half-size gen frames get detail from the real frames (upsample_detail; tau its cutoff).
+// reactive: the denoiser's reactive mask (transparencies: smoke, particles) is bound (texture 9).
 struct HudParams { uint debug; uint hasLow; float2 mvToOut; float2 outToIn; uint warp; float phase; uint detail; float tau;
-                   float4x4 P; float4x4 Pinv; float3x3 M; };
+                   uint reactive; float4x4 P; float4x4 Pinv; float3x3 M; };
 // Half size (each texel the mean of 2x2: one bilinear sample at their shared corner), for interpolating at half output.
 kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]],
                     uint2 p [[thread_position_in_grid]])
@@ -136,6 +137,7 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
                    texture2d<float, access::sample> curHalf [[texture(6)]],
                    texture2d<float, access::sample> prev [[texture(7)]],
                    texture2d<float, access::sample> prevHalf [[texture(8)]],
+                   texture2d<float, access::read> reactive [[texture(9)]],
                    constant HudParams& h [[buffer(0)]],
                    uint2 p [[thread_position_in_grid]])
 {
@@ -216,6 +218,25 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
         return;
     }
     const DetailParams dp = {h.mvToOut, h.outToIn, h.phase, h.detail, h.tau};
-    dst.write(upsample_detail(gen, cur, curHalf, prev, prevHalf, motion, ui, uv * size, size, dp), p);
+    float4 o = upsample_detail(gen, cur, curHalf, prev, prevHalf, motion, ui, uv * size, size, dp);
+    // Transparencies (smoke, exhaust, particles) have no motion vectors of their own: the interpolator moves them with
+    // what is behind them (the road under a car's exhaust), so they jump. Where the reactive mask marks them and the
+    // two real frames agree better unmoved than moved by the motion vector (smoke that stays on screen with the car),
+    // blend the real frames in place instead.
+    if (h.reactive != 0u && h.detail != 0u) {
+        const float2 q = uv * size;
+        const int2 rs = int2(reactive.get_width(), reactive.get_height()) - 1;
+        const float r = reactive.read(uint2(clamp(int2(q * h.outToIn), int2(0), rs))).r;
+        if (r > 0.02) {
+            const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
+            const float2 mv = motion.read(uint2(clamp(int2(q * h.outToIn), int2(0), ms))).xy * h.mvToOut;
+            const float3 c0 = cur.sample(bilinear, uv).rgb, p0 = prev.sample(bilinear, uv).rgb;
+            const float3 pm = prev.sample(bilinear, (q + mv) / size).rgb;
+            const float3 e0 = abs(c0 - p0), em = abs(c0 - pm);
+            if (max(max(e0.r, e0.g), e0.b) < max(max(em.r, em.g), em.b))
+                o.rgb = mix(o.rgb, mix(p0, c0, h.phase), r);
+        }
+    }
+    dst.write(o, p);
 }
 )";

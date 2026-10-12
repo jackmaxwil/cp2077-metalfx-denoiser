@@ -198,6 +198,7 @@ int main(int argc, char** argv)
             [ce setTexture:halfGen atIndex:6];
             [ce setTexture:prev atIndex:7];
             [ce setTexture:halfGen atIndex:8];
+            [ce setTexture:snap atIndex:9]; // as a reactive mask: all of the HUD's pixels (the worst case is all of them)
             [ce setTexture:snap atIndex:2];
             [ce setTexture:snapLow atIndex:3];
             [ce setTexture:motion atIndex:4];
@@ -209,10 +210,11 @@ int main(int argc, char** argv)
                 float phase;
                 uint32_t detail;
                 float tau;
+                uint32_t reactive;
                 simd_float4x4 P, Pinv;
                 simd_float3x3 M;
             } params = {0, 1, simd_make_float2(mv, mv), simd_make_float2(1536.0f / ow, 960.0f / oh), warp ? 1u : 0u, 0.25f,
-                        half ? 1u : 0u, 0.4f, matrix_identity_float4x4, matrix_identity_float4x4,
+                        half ? 1u : 0u, 0.4f, half ? 1u : 0u, matrix_identity_float4x4, matrix_identity_float4x4,
                         simd_matrix3x3(simd_quaternion(0.02f, simd_make_float3(0, 1, 0)))}; // a 1 degree turn
             [ce setBytes:&params length:sizeof(params) atIndex:0];
             [ce dispatchThreads:MTLSizeMake(ow, oh, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];

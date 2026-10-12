@@ -155,6 +155,22 @@ int g_scalerHit = -1;
 std::atomic<uint64_t> g_hitFrame{~0ull};
 id<MTLTexture> g_hit;
 id<MTLComputePipelineState> g_hitCopy;
+// Reactive mask: the game composites its transparencies (particles, smoke, exhaust, steam, glass, light glows) into the
+// scene color in a run of render passes with targets [render-size RGBA16Float, R8Unorm] and a Depth32Float depth (six
+// in a path traced frame at the car scene, all on one color texture, in one command buffer). The scene is copied
+// before the first of them and after each one ends; where the last copy differs from the first, MetalFX's denoised
+// scaler is told to trust its history less (reactiveMaskTexture), so smoke and particles, which have no motion vectors
+// of their own, stop smearing (the exhaust "distortion"). Request "denoisereactive on|off".
+std::atomic<bool> g_reactiveOn{true};
+bool g_scalerReactive = false;
+id<MTLTexture> g_pre, g_post, g_reactive;
+__unsafe_unretained id g_trEncoder = nil; // the transparent pass being encoded (its color target: g_trColor)
+id<MTLTexture> g_trColor;
+id<MTLCommandBuffer> g_trCb; // the transparent pass's command buffer
+std::atomic<uint64_t> g_preFrame{~0ull}, g_postFrame{~0ull};
+std::atomic<bool> g_saveReactive{false};
+std::atomic<uint64_t> g_reactiveFrame{~0ull}; // the scaler call that last got g_reactive
+id<MTLComputePipelineState> g_reactiveKernel, g_zeroKernel;
 
 NSString* const kSource = @R"(
 #include <metal_stdlib>
@@ -173,6 +189,22 @@ kernel void mfxd_hit(texture2d_array<half, access::read> a [[texture(0)]], textu
 {
     if (p.x >= b.get_width() || p.y >= b.get_height()) return;
     b.write(half4(max(a.read(p, 0).a, half(0.0))), p);
+}
+
+// Reactive mask from the scene before and after the transparencies: the largest channel change relative to the brighter
+// of the two, with a small dead zone (noise, rounding).
+kernel void mfxd_reactive(texture2d<float, access::read> pre [[texture(0)]], texture2d<float, access::read> post [[texture(1)]],
+                          texture2d<float, access::write> mask [[texture(2)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x >= mask.get_width() || p.y >= mask.get_height()) return;
+    const float3 a = max(pre.read(p).rgb, float3(0.0)), b = max(post.read(p).rgb, float3(0.0)), d = abs(b - a);
+    const float l = max(max(max(a.r, a.g), a.b), max(max(b.r, b.g), b.b));
+    mask.write(float4(saturate(2.0 * max(max(d.r, d.g), d.b) / (l + 0.02) - 0.04)), p);
+}
+
+kernel void mfxd_zero(texture2d<float, access::write> mask [[texture(0)]], uint2 p [[thread_position_in_grid]])
+{
+    if (p.x < mask.get_width() && p.y < mask.get_height()) mask.write(float4(0.0), p);
 }
 
 kernel void mfxd_guides(texture2d_array<float, access::read> base [[texture(0)]],
@@ -246,8 +278,11 @@ bool MakePipelines(id<MTLDevice> device)
         g_rcasArray = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_rcas_array"]
                                                             error:&error];
         g_hitCopy = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_hit"] error:&error];
+        g_reactiveKernel = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_reactive"]
+                                                                 error:&error];
+        g_zeroKernel = [device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfxd_zero"] error:&error];
     }
-    if (!g_copy || !g_guides || !g_rcas || !g_rcasArray || !g_hitCopy) {
+    if (!g_copy || !g_guides || !g_rcas || !g_rcasArray || !g_hitCopy || !g_reactiveKernel || !g_zeroKernel) {
         Logger::Error(std::string("Denoise: kernels failed: ") +
                       (error ? error.localizedDescription.UTF8String : "no library"));
         g_copy = nil;
@@ -728,6 +763,153 @@ void RenderPass(id desc)
     }
 }
 
+namespace {
+// The scene color of a transparent pass (nil if desc is not one): exactly two color attachments, in any slots (the
+// game leaves gaps), one render-size RGBA16Float and one R8Unorm, and a Depth32Float depth.
+id<MTLTexture> TransparentPass(MTLRenderPassDescriptor* rp)
+{
+    id<MTLTexture> c = nil, m = nil;
+    for (NSUInteger i = 0; i < 8; ++i) {
+        id<MTLTexture> t = rp.colorAttachments[i].texture;
+        if (!t) {
+            continue;
+        }
+        if (t.pixelFormat == MTLPixelFormatRGBA16Float && !c) {
+            c = t;
+        } else if (t.pixelFormat == MTLPixelFormatR8Unorm && !m) {
+            m = t;
+        } else {
+            return nil;
+        }
+    }
+    id<MTLTexture> d = rp.depthAttachment.texture;
+    const bool yes = c && m && d && d.pixelFormat == MTLPixelFormatDepth32Float && m.width == c.width &&
+                     m.height == c.height && g_diffuse && c.width == g_diffuse.width && c.height == g_diffuse.height;
+    return yes ? c : nil;
+}
+
+// Encodes a copy of src into dst (made or remade to fit). Never with a lock held: the copy's own encoder goes through the
+// encoder hooks (EndEncoding, AfterEndEncoding), which take them.
+void CopyScene(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst)
+{
+    MetalTrace::Internal internal;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:dst destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+}
+
+id<MTLTexture> Fit(id<MTLDevice> dev, id<MTLTexture> t, id<MTLTexture> like)
+{
+    if (t && t.width == like.width && t.height == like.height) {
+        return t;
+    }
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat width:like.width
+                                                                                height:like.height mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead;
+    d.storageMode = MTLStorageModePrivate;
+    return [dev newTextureWithDescriptor:d];
+}
+
+std::mutex g_rxMutex; // the reactive mask's state (never held while encoding)
+std::atomic<bool> g_postPending{false};
+} // namespace
+
+void BeforeRenderPass(id commandBuffer, id desc)
+{
+    BeforeEncoder(commandBuffer);
+    if (g_mode.load(std::memory_order_relaxed) != Fx || !g_reactiveOn.load(std::memory_order_relaxed)) {
+        return;
+    }
+    id<MTLTexture> color = TransparentPass(desc);
+    if (!color) {
+        return;
+    }
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) == 0) {
+        Logger::Info("Denoise: transparent passes found (reactive mask)");
+    }
+    const uint64_t frame = g_frame.load();
+    id<MTLTexture> pre = nil;
+    {
+        std::lock_guard<std::mutex> lock(g_rxMutex);
+        if (g_preFrame.load() != frame) { // the first of this frame's transparent passes
+            pre = g_pre = Fit(color.device, g_pre, color);
+            g_preFrame.store(frame);
+        }
+        g_trColor = color;
+        g_trCb = commandBuffer;
+        g_trEncoder = nil; // NoteRenderEncoder: the encoder the game gets for it
+    }
+    if (pre) {
+        CopyScene(commandBuffer, color, pre);
+    }
+}
+
+void NoteRenderEncoder(id encoder)
+{
+    if (!g_trColor) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_rxMutex);
+    if (g_trColor && !g_trEncoder) {
+        g_trEncoder = encoder;
+    }
+}
+
+void AfterEndEncoding(id encoder)
+{
+    if (!g_trEncoder || encoder != g_trEncoder) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_rxMutex);
+    if (encoder == g_trEncoder && g_trColor) {
+        g_postPending = true; // copied at the command buffer's next encoder or commit (BeforeEncoder): the endEncoding
+                              // hooks nest (class and superclass), so the encoder may still count as open here
+        g_trEncoder = nil;
+    }
+}
+
+void BeforeEncoder(id commandBuffer)
+{
+    if (!g_postPending || commandBuffer != g_trCb) {
+        return;
+    }
+    id<MTLCommandBuffer> cb;
+    id<MTLTexture> color, post;
+    {
+        std::lock_guard<std::mutex> lock(g_rxMutex);
+        if (!g_postPending || commandBuffer != g_trCb) {
+            return;
+        }
+        cb = g_trCb;
+        color = g_trColor;
+        post = g_post = Fit(color.device, g_post, color);
+        g_postFrame.store(g_frame.load());
+        g_postPending = false;
+        g_trColor = nil;
+        g_trCb = nil;
+    }
+    CopyScene(cb, color, post);
+}
+
+id ReactiveMask()
+{
+    return g_reactiveFrame.load() + 1 == g_frame.load() ? g_reactive : nil; // EncodeScaler counted this call
+}
+
+void SetReactive(const std::string& how)
+{
+    if (how == "save") { // the next frame's mask as a PNG
+        g_saveReactive.store(true);
+        return;
+    }
+    const bool on = how == "on";
+    g_reactiveOn.store(on);
+    Logger::Info(std::string("Denoise: reactive mask from the transparencies ") + (on ? "on" : "off"));
+}
+
 void SetSharpness(float amount)
 {
     amount = std::clamp(amount, 0.0f, 1.0f);
@@ -804,7 +986,8 @@ bool EncodeScaler(id scaler, id commandBuffer)
         if (!ds || ds.inputWidth != s.inputWidth || ds.inputHeight != s.inputHeight ||
             ds.outputWidth != s.outputWidth || ds.outputHeight != s.outputHeight ||
             ds.colorTextureFormat != color.pixelFormat || ds.motionTextureFormat != motion.pixelFormat ||
-            g_scalerAuto != g_autoExposure.load() || g_scalerHit != g_hitIndex.load()) {
+            g_scalerAuto != g_autoExposure.load() || g_scalerHit != g_hitIndex.load() ||
+            g_scalerReactive != g_reactiveOn.load()) {
             MTLFXTemporalDenoisedScalerDescriptor* d = [MTLFXTemporalDenoisedScalerDescriptor new];
             d.colorTextureFormat = color.pixelFormat;
             d.depthTextureFormat = depth.pixelFormat;
@@ -822,6 +1005,11 @@ bool EncodeScaler(id scaler, id commandBuffer)
             d.autoExposureEnabled = g_autoExposure.load();
             g_scalerAuto = d.autoExposureEnabled;
             g_scalerHit = g_hitIndex.load();
+            g_scalerReactive = g_reactiveOn.load();
+            if (g_scalerReactive) {
+                d.reactiveMaskTextureEnabled = YES;
+                d.reactiveMaskTextureFormat = MTLPixelFormatR8Unorm;
+            }
             if (g_scalerHit >= 0) {
                 d.specularHitDistanceTextureEnabled = YES;
                 d.specularHitDistanceTextureFormat = MTLPixelFormatR16Float;
@@ -838,10 +1026,10 @@ bool EncodeScaler(id scaler, id commandBuffer)
             g_scaler = ds;
             char buf[200];
             std::snprintf(buf, sizeof(buf), "Denoise: denoised scaler %lux%lu -> %lux%lu (color %lu, depth %lu, motion %lu, "
-                          "auto exposure %d, hit distance %d)", (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
+                          "auto exposure %d, hit distance %d, reactive %d)", (unsigned long)s.inputWidth, (unsigned long)s.inputHeight,
                           (unsigned long)s.outputWidth, (unsigned long)s.outputHeight, (unsigned long)color.pixelFormat,
                           (unsigned long)depth.pixelFormat, (unsigned long)motion.pixelFormat, g_scalerAuto ? 1 : 0,
-                          g_scalerHit);
+                          g_scalerHit, g_scalerReactive ? 1 : 0);
             Logger::Info(buf);
         }
         simd_float4x4 worldToView = matrix_identity_float4x4, viewToClip = matrix_identity_float4x4;
@@ -869,6 +1057,42 @@ bool EncodeScaler(id scaler, id commandBuffer)
             ds.specularHitDistanceTexture = g_hit;
             if (!g_hit) {
                 return false;
+            }
+        }
+        if (g_scalerReactive) {
+            if (!g_reactive || g_reactive.width != s.inputWidth || g_reactive.height != s.inputHeight) {
+                MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                                                         width:s.inputWidth
+                                                                                        height:s.inputHeight
+                                                                                     mipmapped:NO];
+                d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+                d.storageMode = MTLStorageModePrivate;
+                g_reactive = [color.device newTextureWithDescriptor:d];
+            }
+            // This frame's transparencies, or the last frame's (the game encodes on several threads); none: zero.
+            id<MTLTexture> pre, post;
+            bool fresh;
+            {
+                std::lock_guard<std::mutex> lock(g_rxMutex);
+                pre = g_pre;
+                post = g_post;
+                fresh = frame - g_postFrame.load() <= 1 && g_postFrame.load() == g_preFrame.load() && pre && post &&
+                        pre.width == s.inputWidth && pre.height == s.inputHeight;
+            }
+            MetalTrace::Internal internal;
+            id<MTLComputeCommandEncoder> ce = [(id<MTLCommandBuffer>)commandBuffer computeCommandEncoder];
+            [ce setComputePipelineState:fresh ? g_reactiveKernel : g_zeroKernel];
+            if (fresh) {
+                [ce setTexture:pre atIndex:0];
+                [ce setTexture:post atIndex:1];
+            }
+            [ce setTexture:g_reactive atIndex:fresh ? 2 : 0];
+            [ce dispatchThreads:MTLSizeMake(s.inputWidth, s.inputHeight, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            [ce endEncoding];
+            ds.reactiveMaskTexture = g_reactive;
+            g_reactiveFrame.store(frame);
+            if (g_saveReactive.exchange(false)) {
+                MetalTrace::SaveTexture(commandBuffer, g_reactive, "reactive");
             }
         }
         ds.exposureTexture = s.exposureTexture;

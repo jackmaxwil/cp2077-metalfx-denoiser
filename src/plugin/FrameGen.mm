@@ -126,6 +126,7 @@ struct HudInputs {
     id<MTLTexture> ui, low, motion;
     float mvScale[2];
     id<MTLTexture> curHalf = nil, prev = nil, prevHalf = nil; // 4x: detail for half-size generated frames (all or none)
+    id<MTLTexture> reactive = nil; // 4x: the denoiser's reactive mask (render size), for transparencies
 };
 
 // The generated frame (gen: output size, or smaller and upscaled bilinear) into dst with this frame's HUD (from its real
@@ -139,6 +140,11 @@ id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerate
 // fg_phase on an in-game sequence (four times the motion): edge detail kept 50-56% -> 75-78% of the real frames
 // (generated at full size: 84%), +0.1-0.7 dB; request "fgdetail on|off".
 std::atomic<bool> g_fgDetail{true};
+// 4x: transparencies (the denoiser's reactive mask) blended in place where they stay on screen (fg_hud); request
+// "fgreactive on|off".
+std::atomic<bool> g_fgReactive{true};
+id<MTLTexture> g_rmask; // this frame's reactive mask, copied at the scaler (AfterScaler)
+uint64_t g_rmaskFrame = ~0ull;
 
 void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur, const HudInputs& h, id<MTLTexture> dst,
                 float mvFactor, const Warp::Params* warp = nullptr, float phase = 0.5f)
@@ -156,6 +162,8 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
     [ce setTexture:detail ? h.curHalf : gen atIndex:6];
     [ce setTexture:detail ? h.prev : cur atIndex:7];
     [ce setTexture:detail ? h.prevHalf : gen atIndex:8];
+    const bool reactive = detail && h.reactive && g_fgReactive.load();
+    [ce setTexture:reactive ? h.reactive : h.ui atIndex:9];
     // Motion vectors times the game's scale are in render pixels; the output's are larger by the upscale.
     const float sx = h.motion ? static_cast<float>(dst.width) / h.motion.width : 1.0f;
     const float sy = h.motion ? static_cast<float>(dst.height) / h.motion.height : 1.0f;
@@ -166,12 +174,13 @@ void RestoreHud(id<MTLCommandBuffer> cb, id<MTLTexture> gen, id<MTLTexture> cur,
         float phase;
         uint32_t detail;
         float tau;
+        uint32_t reactive;
         simd_float4x4 P, Pinv;
         simd_float3x3 M;
     } params = {g_hudDebug.load() ? 1u : 0u, h.low ? 1u : 0u,
                 simd_make_float2(h.motion ? h.mvScale[0] * sx * mvFactor : 0.0f, h.motion ? h.mvScale[1] * sy * mvFactor : 0.0f),
                 simd_make_float2(1.0f / sx, 1.0f / sy), warp ? 1u : 0u, phase, detail ? 1u : 0u, 0.4f,
-                matrix_identity_float4x4,
+                reactive ? 1u : 0u, matrix_identity_float4x4,
                 matrix_identity_float4x4, matrix_identity_float3x3};
     if (warp) {
         params.P = warp->P;
@@ -425,6 +434,11 @@ void HudComposite(id encoder)
     g_uiSnapFrame = frame + 1; // for the frame being presented next
 }
 
+void SetReactive(bool on)
+{
+    g_fgReactive.store(on);
+}
+
 void SetDetail(bool on)
 {
     g_fgDetail.store(on);
@@ -490,6 +504,13 @@ void AfterScaler(id scaler, id commandBuffer)
         [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                    sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
+    }
+    if (id<MTLTexture> r = Denoise::ReactiveMask(); r && r.width == w && r.height == h) { // written in this command buffer
+        if (!Fits(g_rmask, r)) {
+            g_rmask = Make(r.device, r.pixelFormat, w, h, MTLTextureUsageShaderRead);
+        }
+        [blit copyFromTexture:r toTexture:g_rmask];
+        g_rmaskFrame = g_frame + 1;
     }
     [blit endEncoding];
     g_jitter[0] = s.jitterOffsetX;
@@ -587,7 +608,8 @@ std::atomic<int> g_mult{[] {
 }()};
 
 struct Slot {
-    id<MTLTexture> real, half, gen[3], ui, low, motion, depth; // gen: 1/4, 1/2, 3/4 (half size)
+    id<MTLTexture> real, half, gen[3], ui, low, motion, depth, rmask; // gen: 1/4, 1/2, 3/4 (half size)
+    bool hasRmask = false;
     std::atomic<bool> free{true};
 };
 Slot g_slots[3];
@@ -784,6 +806,7 @@ void Pacer()
                     hud.curHalf = s.half;
                     hud.prev = p.real;
                     hud.prevHalf = p.half;
+                    hud.reactive = s.hasRmask ? s.rmask : nil;
                 }
                 if (i < 3) {
                     RestoreHud(cb, s.gen[i], s.real, hud, d.texture, 1.0f, warp ? &wp : nullptr, (i + 1) / 4.0f);
@@ -929,6 +952,13 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
         }
         [blit copyFromTexture:g_depth toTexture:s.depth];
         [blit copyFromTexture:g_motion toTexture:s.motion];
+        s.hasRmask = g_rmask && g_rmaskFrame == g_frame;
+        if (s.hasRmask) {
+            if (!Fits(s.rmask, g_rmask)) {
+                s.rmask = Make(dev, g_rmask.pixelFormat, g_rmask.width, g_rmask.height, MTLTextureUsageShaderRead);
+            }
+            [blit copyFromTexture:g_rmask toTexture:s.rmask];
+        }
         hasUi = g_useUi && g_uiSnapFrame == g_frame && g_uiSnap;
         if (hasUi) {
             if (!Fits(s.ui, g_uiSnap)) {

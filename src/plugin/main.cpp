@@ -97,6 +97,25 @@ void OnUltraScaleChanged(const ModMenuEntryPath*, float value)
     ApplyUltra();
 }
 
+void OnMultiplierChanged(const ModMenuEntryPath*, float value)
+{
+    if (const char* env = std::getenv("METALFX_FG_MULT"); env && *env) { // tests set it themselves
+        return;
+    }
+    FrameGen::SetMultiplier(value >= 3.0f ? 4 : 2);
+}
+
+void OnWarpToggle(const ModMenuEntryPath*, bool on)
+{
+    Warp::SetEnabled(on);
+}
+
+void OnDynamicFpsChanged(const ModMenuEntryPath*, float value)
+{
+    s_dynamicFps.store(value);
+    ApplyUltra();
+}
+
 void OnSharpnessChanged(const ModMenuEntryPath*, float value)
 {
     if (const char* env = std::getenv("METALFX_SHARPNESS"); env && *env) { // tests set it themselves
@@ -206,7 +225,7 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                      .defaultValue = MetalFXDenoiser::s_ultra.load(),
                                      .onChanged = &MetalFXDenoiser::OnUltraToggle};
     const ModMenuToggleInfo framegen = {.entryId = {"frame_generation"},
-                                        .title = {"Frame generation: one generated frame per rendered frame (MetalFX)"},
+                                        .title = {"Frame generation (MetalFX)"},
                                         .defaultValue = FrameGen::Enabled(),
                                         .onChanged = &MetalFXDenoiser::OnFrameGenToggle};
     const ModMenuSliderInfo ultraScale = {.entryId = {"ultra_scale"},
@@ -216,6 +235,24 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                                           .step = 0.25f,
                                           .defaultValue = Config::Get().ultraScale,
                                           .onChanged = &MetalFXDenoiser::OnUltraScaleChanged};
+    const ModMenuSliderInfo multiplier = {.entryId = {"frame_generation_multiplier"},
+                                          .title = {"Frame generation: shown frames per rendered frame (2 or 4)"},
+                                          .minValue = 2.0f,
+                                          .maxValue = 4.0f,
+                                          .step = 2.0f,
+                                          .defaultValue = static_cast<float>(FrameGen::Multiplier()),
+                                          .onChanged = &MetalFXDenoiser::OnMultiplierChanged};
+    const ModMenuToggleInfo warp = {.entryId = {"camera_warp"},
+                                    .title = {"Frame generation 4x: turn shown frames to the newest mouse input"},
+                                    .defaultValue = Config::Get().cameraWarp,
+                                    .onChanged = &MetalFXDenoiser::OnWarpToggle};
+    const ModMenuSliderInfo dynamicFps = {.entryId = {"dynamic_scale_fps"},
+                                          .title = {"Dynamic render scale: hold this rendered fps (0 = off; needs Ultra Performance)"},
+                                          .minValue = 0.0f,
+                                          .maxValue = 60.0f,
+                                          .step = 1.0f,
+                                          .defaultValue = Config::Get().dynamicScaleFps,
+                                          .onChanged = &MetalFXDenoiser::OnDynamicFpsChanged};
     const ModMenuSliderInfo sharpness = {.entryId = {"sharpness"},
                                          .title = {"Sharpening after the Apple denoiser (0 = off)"},
                                          .minValue = 0.0f,
@@ -231,7 +268,10 @@ extern "C" __attribute__((visibility("default"))) bool ModMenu_Register(const Mo
                     api->RegisterToggle("MetalFXDenoiser", "main", &denoiser) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &ultra) &&
                     api->RegisterSlider("MetalFXDenoiser", "main", &ultraScale) &&
+                    api->RegisterSlider("MetalFXDenoiser", "main", &dynamicFps) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &framegen) &&
+                    api->RegisterSlider("MetalFXDenoiser", "main", &multiplier) &&
+                    api->RegisterToggle("MetalFXDenoiser", "main", &warp) &&
                     api->RegisterSlider("MetalFXDenoiser", "main", &sharpness) &&
                     api->RegisterToggle("MetalFXDenoiser", "main", &noisy);
     Logger::Info(ok ? "ModMenu page registered" : "ModMenu registration failed");

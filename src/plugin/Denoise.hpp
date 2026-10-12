@@ -20,6 +20,8 @@ void SetAutoExposure(bool on);
 // Specular hit distance for the denoised scaler from RELAX's noisy specular alpha (-1 off; path tracing: which of its
 // two textures). Request "denoisehit off|0|1".
 void SetHitDistance(int index);
+// MetalFX's reactive mask from the transparencies (Denoise.mm): request "denoisereactive on|off|save".
+void SetReactive(const std::string& how);
 // Camera matrices given to the denoised scaler: "game" (NRD's), "identity", or "rh" (NRD's, view space flipped to -z).
 bool SetCameraMode(const std::string& mode);
 // Read the camera even when off (motion tests).
@@ -56,6 +58,15 @@ void EndEncoding(id encoder); // before the game's endEncoding
 
 // Render passes (G-buffer); desc is an MTLRenderPassDescriptor.
 void RenderPass(id desc);
+// Reactive mask (transparencies): before the game creates a render encoder on commandBuffer for desc, and after an
+// encoder's endEncoding.
+void BeforeRenderPass(id commandBuffer, id desc);
+void NoteRenderEncoder(id encoder); // the encoder the game got for that pass
+void AfterEndEncoding(id encoder);
+// Before the game makes any other encoder on commandBuffer, or commits it.
+void BeforeEncoder(id commandBuffer);
+// The reactive mask the denoised scaler got in the scaler call just encoded (render size, R8Unorm); nil if none.
+id ReactiveMask();
 
 // The game's MetalFX temporal scaler encode (once per frame); true when the denoised scaler was encoded instead.
 bool EncodeScaler(id scaler, id commandBuffer);
