@@ -36,6 +36,7 @@ struct Features {
  */
 struct Debug {
     int logPerformance = 0;      // Log every N frames (0 = disabled)
+    int logTimeline = 0;         // a 300-frame input lag timeline every N frames (Timeline.mm; 0 = off)
     bool showComparison = false; // Side-by-side view
     bool verbose = false;        // Verbose logging
     bool traceMetalCompute = false; // Log each distinct compute pipeline state the game binds
@@ -52,6 +53,7 @@ struct Settings {
     int frameGenerationMultiplier = 2; // displayed frames per rendered frame: 2 or 4
     bool cameraWarp = false;       // turn 4x's shown frames to newer mouse input (Warp.mm)
     float frameLimitFps = 0;       // cap, waiting just before the game reads input (Input.mm); 0 off
+    bool lowLatency = false;       // with the cap: frames start when the GPU is about to be free (Input.mm)
     float dynamicScaleFps = 0;     // Ultra Performance: hold this rendered fps by scaling between ultraScale and 3 (0 off)
     Quality quality = Quality::Quality;
     float ultraScale = 3.0f;      // render scale of ultra_performance (2.0-3.0; the game's is 3.0)

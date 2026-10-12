@@ -33,6 +33,7 @@
 #include "Denoise.hpp"
 #include "DynamicScale.hpp"
 #include "Input.hpp"
+#include "Timeline.hpp"
 #include "Warp.hpp"
 #include "FrameGen.hpp"
 #include "Logger.hpp"
@@ -490,7 +491,8 @@ struct Perf {
 };
 std::atomic<bool> s_perfActive{false};
 std::function<void()> s_firstFrame; // OnFirstFrame
-uint64_t s_perfEvery = 0; // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
+uint64_t s_perfEvery = 0;
+uint64_t s_timelineEvery = 0; // [debug] log_timeline // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
 // The window being recorded. Each window has its own buffer: command buffers of its last frames complete after the
 // window ends, while the next window may already be recording.
 std::shared_ptr<struct Perf> s_perfCur;
@@ -967,6 +969,10 @@ bool PollRequests(uint64_t frame) // one request; false when there is none
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgqueue") {
         FrameGen::SetGenerateOnGameQueue(name == "game");
+    } else if (kind == "lowlatency") {
+        Input::SetLowLatency(name == "on");
+    } else if (kind == "timeline") {
+        Timeline::Arm(std::atoi(name.c_str()));
     } else if (kind == "fgshot") {
         FrameGen::Shots(std::atoi(name.c_str()));
     } else if (kind == "fgreactive") {
@@ -1058,6 +1064,9 @@ void OnPresent(bool fromCommandBuffer)
     if (s_profResolveAt && frame >= s_profResolveAt) {
         s_profResolveAt = 0;
         WriteProfile();
+    }
+    if (s_timelineEvery && frame % s_timelineEvery == 0 && !Timeline::Armed()) {
+        Timeline::Arm(300);
     }
     if (s_perfEvery && frame % s_perfEvery == 0 && !s_perfActive.load()) {
         StartPerf("play-" + std::to_string(frame), 120, frame); // [debug] log_performance: a timing window every N frames
@@ -1868,6 +1877,9 @@ void H_cbCommit(id self, SEL sel)
                         (t_internal ? "" : "") + ": " + std::string(cb.error.description.UTF8String ?: "?"));
       }
     }];
+    if (!t_internal) { // the plugin's own (frame generation) are added by FrameGen, to the frame they show
+        Timeline::OnCommit((__bridge void*)self, s_frame.load() + 1, false);
+    }
     if (s_perfActive.load(std::memory_order_relaxed)) {
         const uint64_t frame = s_frame.load() + 1; // the frame being encoded
         std::shared_ptr<Perf> window;
@@ -1899,6 +1911,18 @@ void H_cbPresent(id self, SEL sel, id drawable)
     }
     OnPresent(true);
     Input::BeginFrame();
+    {
+        const uint64_t n = Input::NotePresentCall();
+        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+          if (cb.GPUEndTime > 0) {
+              Input::NoteGpuDone(n, cb.GPUEndTime);
+          }
+        }];
+    }
+    if (Timeline::Armed()) {
+        const Input::FrameInput in = Input::Current();
+        Timeline::OnGamePresent(s_frame.load(), in.event, in.read, Input::FrameStart(), in.present);
+    }
     // Frame generation presents a generated frame and then the game's (FrameGen.mm), through the original methods.
     if (FrameGen::Present(
             self, drawable, [self, sel](id d) { ORIG(o_cbPresent, V1, self)(self, sel, d); },
@@ -1908,6 +1932,12 @@ void H_cbPresent(id self, SEL sel, id drawable)
         return;
     }
     Input::Track(drawable, Input::Current(), "off");
+    if (Timeline::Armed()) {
+        const uint64_t frame = s_frame.load();
+        [(id<MTLDrawable>)drawable addPresentedHandler:^(id<MTLDrawable> d) {
+          Timeline::OnShown(frame, 4, d.presentedTime);
+        }];
+    }
     ORIG(o_cbPresent, V1, self)(self, sel, drawable);
 }
 
@@ -3169,6 +3199,21 @@ void LogPerformance(uint64_t everyFrames)
     if (!s_perfEvery) {
         s_perfEvery = everyFrames;
     }
+}
+
+void LogTimeline(uint64_t everyFrames)
+{
+    s_timelineEvery = everyFrames;
+}
+
+std::string TraceDir()
+{
+    return s_dir;
+}
+
+uint64_t Frame()
+{
+    return s_frame.load();
 }
 
 const uint8_t* MapGpuAddress(uint64_t gpuAddress, size_t len)

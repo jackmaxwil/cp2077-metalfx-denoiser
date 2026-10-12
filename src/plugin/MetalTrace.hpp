@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 // In-process tracing of Metal compute encoding via Objective-C method swizzling.
 // Logs each distinct compute pipeline state the game binds, the first step toward
@@ -28,6 +29,13 @@ struct Internal {
     Internal();
     ~Internal();
 };
+
+// A 300-frame input lag timeline (Timeline.hpp) every everyFrames frames (0: off).
+void LogTimeline(uint64_t everyFrames);
+
+// The trace folder (requests, dumps, timelines), and the game's frame count (presents so far).
+std::string TraceDir();
+uint64_t Frame();
 
 // Added to the LOD bias of every mipmapped sampler the game creates from now on (the game creates them at startup, with
 // bias 0): negative values pick sharper mip levels, to match the 3x upscale (log2(1/3) - log2(1/2) = -0.585).

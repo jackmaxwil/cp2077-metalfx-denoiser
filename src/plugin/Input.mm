@@ -11,6 +11,7 @@
 #include <thread>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <string>
@@ -36,7 +37,53 @@ NextFn o_next = nullptr;
 // present) lets the input age by the wait. Main thread only.
 std::atomic<double> g_limitInterval{0};
 std::atomic<double> g_slept{0}; // seconds waited since the last TakeLimiterWait
+std::atomic<double> g_frameStart{0}; // when the latest frame started (the limiter released it)
 double g_lastPump = 0, g_nextStart = 0;
+
+// Low-latency pacing (SetLowLatency; like NVIDIA Reflex): when the GPU limits the frame rate, the game reads input,
+// runs its CPU frame, and the frame then waits behind the previous ones on the GPU, so the input ages by that queue (in
+// play with 4x frame generation: present call to GPU done 65 ms for 39 ms frames). Here the frame starts (and reads
+// input) only when its CPU part will end about when the GPU finishes the frame before it: at the previous frame's GPU
+// end plus one GPU frame interval minus one CPU frame, both smoothed. Main thread only, except NoteGpuDone.
+std::atomic<bool> g_lowLatency{false};
+std::mutex g_gpuMutex;
+std::condition_variable g_gpuCv;
+double g_gpuEnd[8] = {};        // GPU end of frame n at [n % 8]
+uint64_t g_gpuEndFrame[8] = {};
+uint64_t g_presented = 0;       // the game's frames presented (present calls)
+double g_gpuInt = 0, g_cpu = 0; // smoothed GPU frame interval (consecutive GPU ends) and CPU frame (start to present)
+double g_lastGpuEnd = 0;
+uint64_t g_lastGpuFrame = 0;
+
+void PaceToGpu()
+{
+    uint64_t frame;
+    double gpuInt, cpu;
+    {
+        std::lock_guard<std::mutex> lock(g_gpuMutex);
+        frame = g_presented; // the latest frame presented: N; the frame starting is N + 1
+        gpuInt = g_gpuInt;
+        cpu = g_cpu;
+    }
+    if (frame < 2 || gpuInt <= 0 || gpuInt > 0.2) {
+        return;
+    }
+    const uint64_t prev = frame - 1; // its GPU end, plus one GPU frame (N), is when the GPU frees up
+    double prevEnd = 0;
+    {
+        std::unique_lock<std::mutex> lock(g_gpuMutex);
+        g_gpuCv.wait_for(lock, std::chrono::milliseconds(100), [&] { return g_gpuEndFrame[prev % 8] == prev; });
+        if (g_gpuEndFrame[prev % 8] != prev) {
+            return;
+        }
+        prevEnd = g_gpuEnd[prev % 8];
+    }
+    const double target = prevEnd + gpuInt - cpu - 0.002; // 2 ms early: a GPU bubble costs throughput
+    const double now = CACurrentMediaTime();
+    if (target > now) {
+        std::this_thread::sleep_for(std::chrono::duration<double>(std::min(target - now, 0.1)));
+    }
+}
 
 void Limit()
 {
@@ -50,7 +97,11 @@ void Limit()
     if (now < g_nextStart) {
         std::this_thread::sleep_for(std::chrono::duration<double>(g_nextStart - now));
     }
+    if (g_lowLatency.load(std::memory_order_relaxed)) {
+        PaceToGpu();
+    }
     const double start = CACurrentMediaTime();
+    g_frameStart.store(start, std::memory_order_relaxed);
     g_slept.fetch_add(start - now, std::memory_order_relaxed);
     // The next start one interval after this one's target (no drift); first, or over a frame late: from now.
     g_nextStart = start - g_nextStart > interval ? start + interval : g_nextStart + interval;
@@ -122,9 +173,50 @@ void SetFrameLimit(float fps)
     }
 }
 
+double FrameStart()
+{
+    return g_frameStart.load(std::memory_order_relaxed);
+}
+
 double TakeLimiterWait()
 {
     return g_slept.exchange(0);
+}
+
+void SetLowLatency(bool on)
+{
+    g_lowLatency.store(on);
+    Logger::Info(std::string("Input: low-latency pacing ") + (on ? "on (frames start when the GPU is about to be free)" : "off"));
+}
+
+uint64_t NotePresentCall()
+{
+    const double now = CACurrentMediaTime(), start = g_frameStart.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_gpuMutex);
+    if (start > 0 && now > start && now - start < 0.2) {
+        g_cpu = g_cpu > 0 ? 0.9 * g_cpu + 0.1 * (now - start) : now - start;
+    }
+    return ++g_presented;
+}
+
+void NoteGpuDone(uint64_t frame, double gpuEnd)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_gpuMutex);
+        g_gpuEnd[frame % 8] = gpuEnd;
+        g_gpuEndFrame[frame % 8] = frame;
+        if (frame == g_lastGpuFrame + 1 && gpuEnd > g_lastGpuEnd) {
+            const double d = gpuEnd - g_lastGpuEnd;
+            if (d < 0.2) {
+                g_gpuInt = g_gpuInt > 0 ? 0.9 * g_gpuInt + 0.1 * d : d;
+            }
+        }
+        if (frame > g_lastGpuFrame) {
+            g_lastGpuFrame = frame;
+            g_lastGpuEnd = gpuEnd;
+        }
+    }
+    g_gpuCv.notify_all();
 }
 
 void BeginFrame()

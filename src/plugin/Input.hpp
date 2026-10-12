@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // The game's mouse input and the input-to-display latency meter (Input.mm). The game takes mouse events off the AppKit
 // event queue on its main thread (-[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:], hooked here) about
 // 10 ms before it presents the frame they went into.
@@ -21,6 +23,16 @@ struct FrameInput {
 void SetFrameLimit(float fps);
 // Seconds the frame limit waited since the previous call (the frame interval minus this is what a frame took uncapped).
 double TakeLimiterWait();
+// When the latest frame started: the frame limit released it (host seconds; 0 without frame_limit_fps).
+double FrameStart();
+
+// Low-latency pacing (needs the frame limit): each frame starts when its CPU part will end about when the GPU finishes
+// the frame before it, so the input does not wait behind a GPU queue (config low_latency, request "lowlatency on|off").
+void SetLowLatency(bool on);
+// The game's present call (render thread): counts frames; returns this frame's number for NoteGpuDone.
+uint64_t NotePresentCall();
+// When the GPU finished the game's frame (its present command buffer completed; host seconds).
+void NoteGpuDone(uint64_t frame, double gpuEnd);
 
 // At the game's present call (render thread): what the game read for this frame, kept as the current frame's input.
 void BeginFrame();

@@ -138,6 +138,7 @@ bool Initialize()
     Input::Start(); // the latency meter's view of the game's mouse input
     Input::SetFrameLimit(config.frameLimitFps);
     Warp::SetEnabled(config.cameraWarp);
+    Input::SetLowLatency(config.lowLatency);
     {
         std::ostringstream os;
         os << "Config loaded: enabled=" << (config.enabled ? "yes" : "no")
@@ -171,6 +172,7 @@ bool Initialize()
     if (denoiser || config.debug.traceMetalCompute || (traceEnv && traceEnv[0] == '1')) {
         MetalTrace::Install();
         MetalTrace::LogPerformance(config.debug.logPerformance > 0 ? config.debug.logPerformance : 0);
+        MetalTrace::LogTimeline(config.debug.logTimeline > 0 ? config.debug.logTimeline : 0);
         MetalTrace::OnFirstFrame([] {
             if (s_ultra.load()) { // only when chosen: never touch the engine's settings otherwise
                 ApplyUltra();

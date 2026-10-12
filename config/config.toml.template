@@ -36,6 +36,10 @@ camera_warp = false
 # Frame rate cap that waits right before the game reads input (fresher input than the game's own Maximum FPS, which
 # should then be off). 0 = off. For 120 Hz with frame_generation_multiplier = 4: 29 (four refreshes fit with slack).
 frame_limit_fps = 0
+# With frame_limit_fps: start each frame (and read input) only when its CPU part will end about when the GPU frees up,
+# so input does not wait behind queued GPU work (like NVIDIA Reflex). In game with 4x: mouse read to frame rendered
+# 75 -> 60 ms median, same frame rate; 2x: 48 -> 45 ms.
+low_latency = true
 # With ultra_performance: hold this rendered frame rate by stepping the render scale between ultra_scale (sharpest) and
 # 3.0. With the game's dynamic resolution on (UserSettings.json, /graphics/presets: DynamicResolutionScaling = true;
 # not in the menu) a change costs nothing (MetalFX keeps one scaler and its history) and steps come every 2 s at most.
@@ -48,6 +52,10 @@ dynamic_scale_fps = 0
 frame_generation_multiplier = 2
 
 [debug]
+# Input lag timeline: 300 frames every N frames (0 = off) as trace/timeline-<n>.jsonl, summarized in the log ("Timeline:");
+# scripts/timeline_report.py splits it into mouse, CPU, GPU queue, GPU and display.
+log_timeline = 1800
+
 # Show the noisy lighting (NRD off, no denoiser): for comparisons only.
 noisy_lighting = false
 

@@ -25,6 +25,7 @@
 #include "Input.hpp"
 #include "Warp.hpp"
 #include "Denoise.hpp"
+#include "Timeline.hpp"
 #include "Logger.hpp"
 #include "MetalTrace.hpp"
 
@@ -641,6 +642,7 @@ std::atomic<double> g_lastGamePresent{0};
 struct Job {
     double queued; // CACurrentMediaTime at enqueue
     int slot, prevSlot, k;
+    uint64_t tlFrame; // the game's frame (MetalTrace::Frame) this job shows, for the timeline
     uint64_t value; // g_event's value once the game's command buffer has filled the slot
     bool interpolate, reset, hasUi, reversed, onGameQueue, generatedOk;
     float mvScale[2], jitter[2], fov, nearPlane, aspect;
@@ -741,6 +743,7 @@ bool Generate(const Job& job, Slot& s, id<MTLCommandBuffer> onto = nil)
         }
     }
     if (!onto) {
+        Timeline::OnCommit((__bridge void*)cb, job.tlFrame, true);
         [cb commit];
     }
     return ok;
@@ -847,14 +850,18 @@ void Pacer()
                     }
                 }
                 NoteShown(d);
+                const uint64_t tlFrame = job.tlFrame;
+                const int shownIndex = i + 1;
                 [d addPresentedHandler:^(id<MTLDrawable> shown) {
                   (shown.presentedTime > 0 ? g_pacerShown : g_pacerUnshown).fetch_add(1);
+                  Timeline::OnShown(tlFrame, shownIndex, shown.presentedTime);
                 }];
                 if (first) {
                     [cb presentDrawable:d];
                 } else {
                     [cb presentDrawable:d afterMinimumDuration:job.interval];
                 }
+                Timeline::OnCommit((__bridge void*)cb, job.tlFrame, true);
                 [cb commit];
                 first = false;
                 ++presents;
@@ -1022,6 +1029,7 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
     {
         Job job{};
         job.queued = now;
+        job.tlFrame = MetalTrace::Frame();
         job.slot = si;
         job.prevSlot = pi;
         job.k = k;

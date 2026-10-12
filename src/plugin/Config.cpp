@@ -117,6 +117,8 @@ bool Load(const std::string& path) {
                 s_settings.frameGeneration = ParseBool(value);
             } else if (key == "camera_warp") {
                 s_settings.cameraWarp = ParseBool(value);
+            } else if (key == "low_latency") {
+                s_settings.lowLatency = ParseBool(value);
             } else if (key == "frame_limit_fps") {
                 s_settings.frameLimitFps = ParseFloat(value);
             } else if (key == "dynamic_scale_fps") {
@@ -149,6 +151,8 @@ bool Load(const std::string& path) {
         } else if (currentSection == "debug") {
             if (key == "log_performance") {
                 s_settings.debug.logPerformance = ParseInt(value);
+            } else if (key == "log_timeline") {
+                s_settings.debug.logTimeline = ParseInt(value);
             } else if (key == "show_comparison") {
                 s_settings.debug.showComparison = ParseBool(value);
             } else if (key == "verbose") {
