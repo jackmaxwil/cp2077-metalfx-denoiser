@@ -42,6 +42,10 @@ frame_limit_fps = 0
 low_latency = true
 # Path tracing: drop the game's per-frame zero fills of 8 MiB and more in its path tracing setup (about 330 of 550 MiB
 # per frame, 1.5 ms of GPU; same image in tests, 6-minute soak clean). Only for game 2.3.1 (checked by binary UUID).
+# Per-thread cache in front of the engine's medium memory heaps (one spinlock per heap; job workers spent about 9 percent
+# of their time spinning on it): freed blocks of 512 B-64 KB are reused by the same thread without the lock. In game:
+# 73 percent of those allocations served from the cache, stable.
+heap_cache = false
 skip_rt_clears = false
 # With ultra_performance: hold this rendered frame rate by stepping the render scale between ultra_scale (sharpest) and
 # 3.0. With the game's dynamic resolution on (UserSettings.json, /graphics/presets: DynamicResolutionScaling = true;
