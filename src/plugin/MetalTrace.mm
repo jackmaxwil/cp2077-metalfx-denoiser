@@ -496,7 +496,8 @@ struct Perf {
 std::atomic<bool> s_perfActive{false};
 std::function<void()> s_firstFrame; // OnFirstFrame
 uint64_t s_perfEvery = 0;
-uint64_t s_timelineEvery = 0; // [debug] log_timeline // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
+uint64_t s_timelineEvery = 0; // [debug] log_timeline: seconds between timelines (frames ran 300+ fps in menus)
+double s_timelineLast = 0; // [debug] log_performance / METALFX_PERF_EVERY: a 120-frame timing window every N frames
 // The window being recorded. Each window has its own buffer: command buffers of its last frames complete after the
 // window ends, while the next window may already be recording.
 std::shared_ptr<struct Perf> s_perfCur;
@@ -1141,7 +1142,8 @@ void OnPresent(bool fromCommandBuffer)
         }
         s_fillUntil.store(0);
     }
-    if (s_timelineEvery && frame % s_timelineEvery == 0 && !Timeline::Armed()) {
+    if (s_timelineEvery && !Timeline::Armed() && Now() - s_timelineLast >= static_cast<double>(s_timelineEvery)) {
+        s_timelineLast = Now();
         Timeline::Arm(300);
     }
     if (s_perfEvery && frame % s_perfEvery == 0 && !s_perfActive.load()) {

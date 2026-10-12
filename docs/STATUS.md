@@ -495,3 +495,13 @@ captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B;
 - Player settings now: MetalFX Sharpness 0 (game menu), output 3456x2160 instead of 2992x1870 (which the display then
   stretched to its 3456 pixels: blur on top of the upscale), ultra_scale 2.25 (1536x960, about the render cost of
   2992x1870 at 2.0). The plugin's own sharpening (ModMenu slider) stays 0; raise it a little for a crisper image.
+
+## 4x judder in turns (2026-10-11)
+
+- Player: "turn frames warp is severely unstable". The play timeline (in world, 4x): a frame every 48 ms, but its four
+  images reached the display 3.7 ms apart (median; p90 6.9 ms), then the picture held for about 37 ms. The pacer
+  presented images 2-4 with presentDrawable:afterMinimumDuration: (one refresh after the previous image), which is not
+  honored with the game's VSync off (its layer's displaySyncEnabled is NO).
+- Now each image after the first is presented at an absolute time, evenly over the frame interval (smoothed interval /
+  (k + 1), at least one refresh): presentDrawable:atTime:. Needs a visible display to verify (log_timeline).
+- log_timeline is in seconds now (60): counted in frames, it ran every few seconds in menus (300+ fps).

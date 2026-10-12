@@ -34,8 +34,8 @@ struct Internal {
 // request "rtclears skip|keep"); only for the game build they were found in.
 void SetSkipRtClears(bool on);
 
-// A 300-frame input lag timeline (Timeline.hpp) every everyFrames frames (0: off).
-void LogTimeline(uint64_t everyFrames);
+// A 300-frame input lag timeline (Timeline.hpp) every everySeconds seconds (0: off).
+void LogTimeline(uint64_t everySeconds);
 
 // The trace folder (requests, dumps, timelines), and the game's frame count (presents so far).
 std::string TraceDir();

@@ -647,6 +647,7 @@ struct Job {
     bool interpolate, reset, hasUi, reversed, onGameQueue, generatedOk;
     float mvScale[2], jitter[2], fov, nearPlane, aspect;
     double dt, interval;
+    double spacing; // seconds between this frame's shown images: the smoothed frame interval / (k + 1), at least a refresh
     CAMetalLayer* layer;
     Input::FrameInput input;
     Warp::View view, prevView; // this frame's and the previous frame's camera and input (camera warp)
@@ -775,6 +776,7 @@ void Pacer()
             [g_event waitUntilSignaledValue:job.value timeoutMS:1000]; // the game's frame is done: start showing it
             delaySum += CACurrentMediaTime() - job.queued;
             bool first = true, late = false;
+            double firstAt = 0; // when the first image was presented
             for (int i = 0; i < 4; ++i) {
                 if (i < 3 && (!generated || (job.k == 1 && i != 1))) {
                     continue;
@@ -856,10 +858,15 @@ void Pacer()
                   (shown.presentedTime > 0 ? g_pacerShown : g_pacerUnshown).fetch_add(1);
                   Timeline::OnShown(tlFrame, shownIndex, shown.presentedTime);
                 }];
+                // Each image at an absolute time, evenly over the frame interval. Relative timing (afterMinimumDuration from
+                // the previous image) is not honored with the game's VSync off: in play the four images of a frame
+                // reached the display 3.7 ms apart and then the picture held for 37 ms (judder in turns).
                 if (first) {
                     [cb presentDrawable:d];
+                    firstAt = CACurrentMediaTime();
                 } else {
-                    [cb presentDrawable:d afterMinimumDuration:job.interval];
+                    const int nth = job.k == 1 ? 1 : (i < 3 ? i : 3); // images after the first
+                    [cb presentDrawable:d atTime:firstAt + nth * job.spacing - 0.001];
                 }
                 Timeline::OnCommit((__bridge void*)cb, job.tlFrame, true);
                 [cb commit];
@@ -1047,6 +1054,7 @@ void PresentMulti(id<MTLCommandBuffer> cb, id<MTLTexture> tex, double dt)
         job.aspect = aspect;
         job.dt = dt;
         job.interval = n * g_refresh - 0.001;
+        job.spacing = std::max(g_refresh, g_dtEma / (k + 1));
         job.layer = g_overlay;
         job.input = Input::Current();
         job.view = Warp::Capture();

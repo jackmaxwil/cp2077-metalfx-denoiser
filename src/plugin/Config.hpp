@@ -36,7 +36,7 @@ struct Features {
  */
 struct Debug {
     int logPerformance = 0;      // Log every N frames (0 = disabled)
-    int logTimeline = 0;         // a 300-frame input lag timeline every N frames (Timeline.mm; 0 = off)
+    int logTimeline = 0;         // a 300-frame input lag timeline every N seconds (Timeline.mm; 0 = off)
     bool showComparison = false; // Side-by-side view
     bool verbose = false;        // Verbose logging
     bool traceMetalCompute = false; // Log each distinct compute pipeline state the game binds
