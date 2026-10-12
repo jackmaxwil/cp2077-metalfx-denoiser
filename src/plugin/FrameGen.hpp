@@ -18,6 +18,9 @@ void SetGenerateOnGameQueue(bool on);
 void SetDetail(bool on);
 // Tests: 4x's in-place blend of transparencies (request "fgreactive on|off"; on by default).
 void SetReactive(bool on);
+// Tests (request "fgshot <n>", 4x): every image shown for the next n game frames, as fgsNN-1..3 (generated quarters)
+// and fgsNN-4 (the game's frame), PNGs as presented (HUD pass included).
+void Shots(int frames);
 // Tests (request "warpeval <n>", 4x with camera warp): the next n game frames shown, as wevNN-real and (when warped)
 // wevNN-warped; scripts/warpeval_report.py scores warped N and plain N against N+1.
 void WarpEval(int frames);

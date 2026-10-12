@@ -88,6 +88,7 @@ static inline float4 upsample_detail(texture2d<float, access::sample> gen, textu
     if (dp.mode == 0u) return base;
     const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
     const float2 mv = motion.read(uint2(clamp(int2(q * dp.outToIn), int2(0), ms))).xy * dp.mvToOut;
+    if (!all(isfinite(mv))) return base;
     float3 add = float3(0.0);
     float wsum = 0.0;
     for (int k = 0; k < 2; ++k) {
@@ -223,15 +224,16 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
     // what is behind them (the road under a car's exhaust), so they jump. Where the reactive mask marks them and the
     // two real frames agree better unmoved than moved by the motion vector (smoke that stays on screen with the car),
     // blend the real frames in place instead.
-    if (h.reactive != 0u && h.detail != 0u) {
+    if (h.reactive != 0u && h.detail != 0u && reactive.get_width() == motion.get_width() &&
+        reactive.get_height() == motion.get_height()) {
         const float2 q = uv * size;
         const int2 rs = int2(reactive.get_width(), reactive.get_height()) - 1;
         const float r = reactive.read(uint2(clamp(int2(q * h.outToIn), int2(0), rs))).r;
-        if (r > 0.02) {
-            const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
-            const float2 mv = motion.read(uint2(clamp(int2(q * h.outToIn), int2(0), ms))).xy * h.mvToOut;
+        const int2 ms = int2(motion.get_width(), motion.get_height()) - 1;
+        const float2 mv = motion.read(uint2(clamp(int2(q * h.outToIn), int2(0), ms))).xy * h.mvToOut;
+        if (r > 0.02 && all(isfinite(mv))) {
             const float3 c0 = cur.sample(bilinear, uv).rgb, p0 = prev.sample(bilinear, uv).rgb;
-            const float3 pm = prev.sample(bilinear, (q + mv) / size).rgb;
+            const float3 pm = prev.sample(bilinear, clamp((q + mv) / size, float2(0.0), float2(1.0))).rgb;
             const float3 e0 = abs(c0 - p0), em = abs(c0 - pm);
             if (max(max(e0.r, e0.g), e0.b) < max(max(em.r, em.g), em.b))
                 o.rgb = mix(o.rgb, mix(p0, c0, h.phase), r);

@@ -139,10 +139,16 @@ id<MTLTexture> g_lastGen; // the last generated frame with the HUD (LastGenerate
 // vectors to their moment, where the real frame's half-size copy agrees with them (FrameGenHud.h upsample_detail).
 // fg_phase on an in-game sequence (four times the motion): edge detail kept 50-56% -> 75-78% of the real frames
 // (generated at full size: 84%), +0.1-0.7 dB; request "fgdetail on|off".
-std::atomic<bool> g_fgDetail{true};
+std::atomic<bool> g_fgDetail{[] {
+    const char* env = std::getenv("METALFX_FG_DETAIL"); // tests: 0 starts with it off
+    return !(env && *env == '0');
+}()};
 // 4x: transparencies (the denoiser's reactive mask) blended in place where they stay on screen (fg_hud); request
 // "fgreactive on|off".
-std::atomic<bool> g_fgReactive{true};
+std::atomic<bool> g_fgReactive{[] {
+    const char* env = std::getenv("METALFX_FG_REACTIVE"); // tests: 0 starts with it off
+    return !(env && *env == '0');
+}()};
 id<MTLTexture> g_rmask; // this frame's reactive mask, copied at the scaler (AfterScaler)
 uint64_t g_rmaskFrame = ~0ull;
 
@@ -645,6 +651,8 @@ struct Job {
 };
 Warp::View g_prevView;
 std::atomic<int> g_warpEvalLeft{0}; // request "warpeval <n>": the next n game frames shown, warped and not
+std::atomic<int> g_shotLeft{0};     // request "fgshot <n>": every image shown for the next n game frames (4x)
+int g_shotIndex = 0;
 int g_warpEvalIndex = 0;
 std::mutex g_jobMutex;
 std::condition_variable g_jobCv;
@@ -816,6 +824,15 @@ void Pacer()
                     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
                     [blit copyFromTexture:s.real toTexture:d.texture];
                     [blit endEncoding];
+                }
+                if (g_shotLeft.load() > 0) { // as shown: fgsNN-<1..3 generated quarter, 4 the game's frame>
+                    char name[32];
+                    std::snprintf(name, sizeof(name), "fgs%02d-%d", g_shotIndex, i + 1);
+                    MetalTrace::SaveTexture(cb, d.texture, name);
+                    if (i == 3) {
+                        ++g_shotIndex;
+                        g_shotLeft.fetch_sub(1);
+                    }
                 }
                 if (i == 3) {
                     Input::Track(d, job.input, warp ? "4x warped" : "4x");
@@ -1048,6 +1065,11 @@ void SetMultiplier(int frames)
         g_reset = true;
         Logger::Info("FrameGen: multiplier " + std::to_string(m));
     }
+}
+
+void Shots(int frames)
+{
+    g_shotLeft.store(frames);
 }
 
 void WarpEval(int frames)

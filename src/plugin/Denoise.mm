@@ -161,7 +161,10 @@ id<MTLComputePipelineState> g_hitCopy;
 // before the first of them and after each one ends; where the last copy differs from the first, MetalFX's denoised
 // scaler is told to trust its history less (reactiveMaskTexture), so smoke and particles, which have no motion vectors
 // of their own, stop smearing (the exhaust "distortion"). Request "denoisereactive on|off".
-std::atomic<bool> g_reactiveOn{true};
+std::atomic<bool> g_reactiveOn{[] {
+    const char* env = std::getenv("METALFX_REACTIVE"); // tests: 0 starts with it off
+    return !(env && *env == '0');
+}()};
 bool g_scalerReactive = false;
 id<MTLTexture> g_pre, g_post, g_reactive;
 __unsafe_unretained id g_trEncoder = nil; // the transparent pass being encoded (its color target: g_trColor)

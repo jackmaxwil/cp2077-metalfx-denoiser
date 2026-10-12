@@ -967,6 +967,8 @@ bool PollRequests(uint64_t frame) // one request; false when there is none
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgqueue") {
         FrameGen::SetGenerateOnGameQueue(name == "game");
+    } else if (kind == "fgshot") {
+        FrameGen::Shots(std::atoi(name.c_str()));
     } else if (kind == "fgreactive") {
         FrameGen::SetReactive(name == "on");
     } else if (kind == "fgdetail") {
