@@ -33,6 +33,7 @@
 #include "Denoise.hpp"
 #include "DynamicScale.hpp"
 #include "Input.hpp"
+#include "HeapCache.hpp"
 #include "Timeline.hpp"
 #include "Warp.hpp"
 #include "FrameGen.hpp"
@@ -1013,6 +1014,12 @@ bool PollRequests(uint64_t frame) // one request; false when there is none
         }
         s_fillFrom.store(frame + 1);
         s_fillUntil.store(frame + 1 + std::max(1, std::atoi(name.c_str())));
+    } else if (kind == "heapcache") {
+        if (name == "stats") {
+            HeapCache::LogStats();
+        } else {
+            HeapCache::SetEnabled(name == "on");
+        }
     } else if (kind == "rtclears") {
         MetalTrace::SetSkipRtClears(name == "skip");
     } else if (kind == "fillskip") {

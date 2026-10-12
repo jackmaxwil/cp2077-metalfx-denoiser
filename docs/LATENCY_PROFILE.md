@@ -91,6 +91,22 @@ generation): wavefront path tracing 6.0 ms, RTXDI 3.7, the Apple denoiser 1.8 + 
   new buffers); the same launch-with-skip run was then clean. The player's config keeps skip_rt_clears off until a run
   with render scale changes is clean too.
 
+## Spinlock contention: per-thread heap cache (2026-10-11)
+
+- The medium heap (TLSF, pool +0xcd80) guards Alloc 0x10000a8a8, AllocDefault 0x10000a82c, Free 0x10000aa54, Init
+  0x10000a7ac and Release 0x10000a7f4 with one writer spinlock (heap +0x80). RED4ext.SDK scripts/medium_heap.py
+  verifies the five (function starts, the lock call at x0 + 0x80, the exact lock routine, each calling its own inner
+  TLSF routine, and the TLSF block header the cache reads) and adds them to the address DB.
+- HeapCache.cpp hooks them: freed blocks of 512 B to 64 KB go to the freeing thread's cache (8 per power-of-two
+  class, 256 KB per heap, 4 heaps per thread); an allocation of up to 64 KB, alignment up to 16, takes one of its class
+  without the lock. Cached blocks stay allocated in the heap; any Init or Release drops all caches. Config heap_cache,
+  request "heapcache on|off|stats".
+- In game (heapab scenario, 4x, turns): 73% of medium allocations from the cache (40668 hits, 14852 misses; 125k
+  cached frees), no errors, 1 heap reset. The speed effect is not measured yet: that run was 2-3x slower overall
+  (frames 67-100 ms, GPU 66-121 ms per frame, drifting in both halves) with mediaanalysisd (Photos analysis, GPU and
+  Neural Engine) at 126% CPU and a stuck unittest process at 99% in the background, and its scene had little lock
+  spinning (30 ms per 10 s against 6.5 s in the earlier profile).
+
 ## Done
 
 - low_latency (config, request "lowlatency", default on in the template; on in the player's config).

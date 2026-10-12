@@ -1,5 +1,6 @@
 #include "EngineDrs.hpp"
 
+#include "Fnv1a.hpp"
 #include "Logger.hpp"
 
 #include <RED4ext/RED4ext.hpp>
@@ -29,15 +30,6 @@ uint8_t* const* g_renderer = nullptr; // address DB "Renderer/Global" (verified)
 std::atomic<bool> g_active{false};
 std::atomic<float> g_scale{0}, g_sharpest{0};
 uint64_t g_frames = 0; // render thread only
-
-uint32_t Fnv1a32(const char* text)
-{
-    uint32_t h = 0x811C9DC5u;
-    for (; *text; ++text) {
-        h = (h ^ static_cast<unsigned char>(*text)) * 0x01000193u;
-    }
-    return h;
-}
 
 void H_update(State* s, uint64_t outLo, uint64_t outHi, void* ctx)
 {

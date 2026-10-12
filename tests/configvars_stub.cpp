@@ -19,3 +19,7 @@ bool EngineDrs::Active()
 }
 
 void EngineDrs::SetScale(float, float) {}
+
+#include "HeapCache.hpp"
+void HeapCache::SetEnabled(bool) {}
+void HeapCache::LogStats() {}

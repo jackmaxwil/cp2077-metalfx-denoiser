@@ -18,6 +18,7 @@
 #include "ConfigVars.hpp"
 #include "DynamicScale.hpp"
 #include "EngineDrs.hpp"
+#include "HeapCache.hpp"
 #include "Input.hpp"
 #include "Warp.hpp"
 #include "Denoise.hpp"
@@ -290,6 +291,8 @@ RED4EXT_C_EXPORT bool RED4EXT_CALL Main(RED4ext::v1::PluginHandle aHandle, RED4e
             return false;
         }
         EngineDrs::Attach(aHandle, aSdk);
+        HeapCache::Attach(aHandle, aSdk);
+        HeapCache::SetEnabled(Config::Get().heapCache);
         return true;
     case RED4ext::v1::EMainReason::Unload:
         MetalFXDenoiser::Shutdown();
