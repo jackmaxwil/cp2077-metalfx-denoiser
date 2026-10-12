@@ -139,6 +139,7 @@ bool Initialize()
     Input::SetFrameLimit(config.frameLimitFps);
     Warp::SetEnabled(config.cameraWarp);
     Input::SetLowLatency(config.lowLatency);
+    MetalTrace::SetSkipRtClears(config.skipRtClears);
     {
         std::ostringstream os;
         os << "Config loaded: enabled=" << (config.enabled ? "yes" : "no")

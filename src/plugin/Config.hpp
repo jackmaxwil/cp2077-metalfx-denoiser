@@ -53,7 +53,8 @@ struct Settings {
     int frameGenerationMultiplier = 2; // displayed frames per rendered frame: 2 or 4
     bool cameraWarp = false;       // turn 4x's shown frames to newer mouse input (Warp.mm)
     float frameLimitFps = 0;       // cap, waiting just before the game reads input (Input.mm); 0 off
-    bool lowLatency = false;       // with the cap: frames start when the GPU is about to be free (Input.mm)
+    bool lowLatency = false;
+    bool skipRtClears = false;     // drop path tracing's large per-frame buffer clears (MetalTrace.mm)       // with the cap: frames start when the GPU is about to be free (Input.mm)
     float dynamicScaleFps = 0;     // Ultra Performance: hold this rendered fps by scaling between ultraScale and 3 (0 off)
     Quality quality = Quality::Quality;
     float ultraScale = 3.0f;      // render scale of ultra_performance (2.0-3.0; the game's is 3.0)

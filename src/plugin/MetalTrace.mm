@@ -59,6 +59,10 @@
 #include <set>
 #include <cstdlib>
 #include <atomic>
+#include <execinfo.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <tuple>
 #include <deque>
 #include <cmath>
 #include <cstdio>
@@ -501,6 +505,33 @@ std::shared_ptr<struct Perf> s_perfCur;
 std::atomic<bool> s_skip{false};        // listed pipelines
 std::atomic<bool> s_skipRefit{false};
 std::atomic<bool> s_skipMetalFX{false};
+// Buffer fills (request "fillstat <frames>"): the game's fillBuffer calls grouped by call site (game offset of the
+// return address and the two callers above it), size and value, logged after the frames; request "fillskip <bytes>|off"
+// drops the game's fills of at least that many bytes (tests).
+struct FillKey {
+    uint64_t site[3];
+    uint64_t bytes;
+    uint32_t value;
+    uint64_t bufLen;
+    std::string label;
+    bool operator<(const FillKey& o) const
+    {
+        return std::tie(site[0], site[1], site[2], bytes, value, label) <
+               std::tie(o.site[0], o.site[1], o.site[2], o.bytes, o.value, o.label);
+    }
+};
+std::mutex s_fillMutex;
+std::map<FillKey, uint64_t> s_fills;
+std::atomic<uint64_t> s_fillUntil{0}, s_fillFrom{0};
+std::atomic<uint64_t> s_fillSkipMin{0}, s_fillSkipped{0};
+// Path tracing's per-frame buffer clears (SetSkipRtClears, config skip_rt_clears): the game's path tracing frame setup
+// (0x100fe2e54, Cyberpunk 2077 2.3.1, binary UUID A6656ADC-...; its call sites 0x100fe2e54-0x100fe5f60) zero-fills about
+// 30 render-graph buffers every frame, 550 MiB in all, 1.5-1.7 ms of GPU (docs/LATENCY_PROFILE.md). The zero fills of
+// at least 8 MiB from there (about 330 MiB) are dropped; the 0xFF fills (empty markers) and smaller ones stay. Another
+// game build has other addresses: nothing matches, nothing is dropped.
+std::atomic<bool> s_skipRtClears{false};
+constexpr uint64_t kRtClearsLo = 0x100fe2e54, kRtClearsHi = 0x100fe5f60, kRtClearsMin = 8u << 20;
+std::atomic<uint64_t> s_rtClearsSkipped{0};
 std::shared_mutex s_skipMutex;
 std::unordered_set<const void*> s_skipPipes;
 std::atomic<uint64_t> s_skipped{0};
@@ -969,6 +1000,18 @@ bool PollRequests(uint64_t frame) // one request; false when there is none
         DynamicScale::Configure(std::strtof(name.c_str(), nullptr), 0);
     } else if (kind == "fgqueue") {
         FrameGen::SetGenerateOnGameQueue(name == "game");
+    } else if (kind == "fillstat") {
+        {
+            std::lock_guard<std::mutex> lock(s_fillMutex);
+            s_fills.clear();
+        }
+        s_fillFrom.store(frame + 1);
+        s_fillUntil.store(frame + 1 + std::max(1, std::atoi(name.c_str())));
+    } else if (kind == "rtclears") {
+        MetalTrace::SetSkipRtClears(name == "skip");
+    } else if (kind == "fillskip") {
+        s_fillSkipMin.store(name == "off" ? 0 : std::strtoull(name.c_str(), nullptr, 10));
+        Logger::Info("Metal trace: skipping the game's buffer fills of at least " + name + " bytes");
     } else if (kind == "lowlatency") {
         Input::SetLowLatency(name == "on");
     } else if (kind == "timeline") {
@@ -1064,6 +1107,34 @@ void OnPresent(bool fromCommandBuffer)
     if (s_profResolveAt && frame >= s_profResolveAt) {
         s_profResolveAt = 0;
         WriteProfile();
+    }
+    if (const uint64_t until = s_fillUntil.load(); until && frame == until) {
+        std::map<FillKey, uint64_t> fills;
+        {
+            std::lock_guard<std::mutex> lock(s_fillMutex);
+            fills.swap(s_fills);
+        }
+        const uint64_t frames = until - s_fillFrom.load();
+        uint64_t total = 0;
+        std::vector<std::pair<uint64_t, FillKey>> bySize;
+        for (const auto& [k, n] : fills) {
+            total += k.bytes * n;
+            bySize.push_back({k.bytes * n, k});
+        }
+        std::sort(bySize.begin(), bySize.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "Metal trace: buffer fills over %llu frames: %.1f MiB per frame, %zu kinds",
+                      (unsigned long long)frames, total / 1048576.0 / std::max<uint64_t>(frames, 1), fills.size());
+        Logger::Info(buf);
+        for (size_t i = 0; i < std::min<size_t>(bySize.size(), 24); ++i) {
+            const FillKey& k = bySize[i].second;
+            std::snprintf(buf, sizeof(buf), "Metal trace: fill %.2f MiB of %.2f (\"%s\") value %u x%llu per frame from 0x%llx < 0x%llx < 0x%llx",
+                          k.bytes / 1048576.0, k.bufLen / 1048576.0, k.label.c_str(), k.value,
+                          (unsigned long long)(fills[k] / std::max<uint64_t>(frames, 1)),
+                          (unsigned long long)k.site[0], (unsigned long long)k.site[1], (unsigned long long)k.site[2]);
+            Logger::Info(buf);
+        }
+        s_fillUntil.store(0);
     }
     if (s_timelineEvery && frame % s_timelineEvery == 0 && !Timeline::Armed()) {
         Timeline::Arm(300);
@@ -2731,10 +2802,80 @@ void H_bTB(id self, SEL sel, id src, NSUInteger ss, NSUInteger sl, MTLOrigin so,
          self)(self, sel, src, ss, sl, so, size, dst, dof, bpr, bpi);
 }
 
+// The game's code offset (unslid, 0x100000000 based) of a return address, or 0 outside the main executable.
+uint32_t GameImage()
+{
+    for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
+        const char* name = _dyld_get_image_name(i);
+        if (name && std::strstr(name, "/Contents/MacOS/Cyberpunk2077")) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// The game binary is the one the clear addresses are from (LC_UUID).
+bool GameUuidOk()
+{
+    static const bool ok = [] {
+        const mach_header_64* h = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(GameImage()));
+        const uint8_t want[16] = {0xA6, 0x65, 0x6A, 0xDC, 0xFB, 0xE2, 0x36, 0xA4, 0x9B, 0x9D, 0xB4, 0xA9, 0xDE, 0x64, 0x50, 0x89};
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(h + 1);
+        for (uint32_t i = 0; h && i < h->ncmds; ++i) {
+            const load_command* lc = reinterpret_cast<const load_command*>(p);
+            if (lc->cmd == LC_UUID) {
+                return std::memcmp(reinterpret_cast<const uuid_command*>(lc)->uuid, want, 16) == 0;
+            }
+            p += lc->cmdsize;
+        }
+        return false;
+    }();
+    return ok;
+}
+
+uint64_t GameOffset(const void* ra)
+{
+    static const uint32_t image = GameImage();
+    static const intptr_t slide = _dyld_get_image_vmaddr_slide(image);
+    static const uintptr_t lo = reinterpret_cast<uintptr_t>(_dyld_get_image_header(image));
+    const uintptr_t a = reinterpret_cast<uintptr_t>(ra);
+    return a >= lo && a < lo + 0x10000000 ? a - slide : 0;
+}
+
 void H_bFill(id self, SEL sel, id buf, NSRange range, uint8_t value)
 {
     if (s_capture.load(std::memory_order_relaxed)) {
         NoteBlit(self, "fill", nil, buf, range.length);
+    }
+    if (!t_internal) {
+        const uint64_t frame = s_frame.load(std::memory_order_relaxed);
+        if (frame >= s_fillFrom.load(std::memory_order_relaxed) && frame < s_fillUntil.load(std::memory_order_relaxed)) {
+            void* bt[8];
+            const int n = backtrace(bt, 8);
+            NSString* label = [(id<MTLBuffer>)buf label];
+            FillKey k{{0, 0, 0}, range.length, value, [(id<MTLBuffer>)buf length], label ? label.UTF8String : ""};
+            for (int i = 1, j = 0; i < n && j < 3; ++i) { // [0] is this hook
+                if (const uint64_t off = GameOffset(bt[i])) {
+                    k.site[j++] = off;
+                }
+            }
+            std::lock_guard<std::mutex> lock(s_fillMutex);
+            ++s_fills[k];
+        }
+        const uint64_t skipMin = s_fillSkipMin.load(std::memory_order_relaxed);
+        if (skipMin && range.length >= skipMin) {
+            s_fillSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (s_skipRtClears.load(std::memory_order_relaxed) && value == 0 && range.length >= kRtClearsMin) {
+            const uint64_t site = GameOffset(__builtin_return_address(0));
+            if (site >= kRtClearsLo && site < kRtClearsHi && GameUuidOk()) {
+                if (s_rtClearsSkipped.fetch_add(1, std::memory_order_relaxed) == 0) {
+                    Logger::Info("Metal trace: path tracing's per-frame clears of 8 MiB and more are skipped");
+                }
+                return;
+            }
+        }
     }
     ORIG(o_bFill, void (*)(id, SEL, id, NSRange, uint8_t), self)(self, sel, buf, range, value);
 }
@@ -3199,6 +3340,12 @@ void LogPerformance(uint64_t everyFrames)
     if (!s_perfEvery) {
         s_perfEvery = everyFrames;
     }
+}
+
+void SetSkipRtClears(bool on)
+{
+    s_skipRtClears.store(on);
+    Logger::Info(std::string("Metal trace: path tracing clears ") + (on ? "skipped (8 MiB and more)" : "kept"));
 }
 
 void LogTimeline(uint64_t everyFrames)

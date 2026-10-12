@@ -73,6 +73,20 @@ generation): wavefront path tracing 6.0 ms, RTXDI 3.7, the Apple denoiser 1.8 + 
   is power the GPU could use. Options: pre-size those arrays (hook DynArray_Realloc for PoolRaytrace to grow
   geometrically), or a per-thread cache in front of the medium allocator.
 
+## The 550 MiB clear (2026-10-11, later)
+
+- Request "fillstat <frames>" groups the game's fillBuffer calls by call site (game offsets of the return address and
+  two callers), size, value and buffer label. All 68 large clears come from one function, 0x100fe2e54 (12.5 KB, the
+  path tracing frame setup, taken when the ray tracing mode global at 0x108ffd15c is 2), called from 0x1010d6b98 <
+  0x100f040f8: about 30 render-graph buffers zeroed (113, 64, 2x30, 19, 5x15, 6x7.5 MiB, ...) and about 40 filled with
+  0xFF (3.76 MiB each, likely empty markers), every frame.
+- Skipping the zero fills of 8 MiB and more from that function (about 330 MiB; config skip_rt_clears, request
+  "rtclears skip|keep"; checked against the binary's UUID and the function's address range, so another game build
+  skips nothing): the clear pass (1.5-1.7 ms) is gone from the per-encoder profile (game frame 30.7 -> 28.6 ms in the
+  clean pair); same-view captures kept vs skipped 33.3-33.7 dB, as kept vs kept seconds apart (33.7); a 6-minute soak
+  with turns and time running logged no GPU errors and showed a normal image.
+- The player's config now uses 2x frame generation and skip_rt_clears.
+
 ## Done
 
 - low_latency (config, request "lowlatency", default on in the template; on in the player's config).

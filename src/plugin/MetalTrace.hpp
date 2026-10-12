@@ -30,6 +30,10 @@ struct Internal {
     ~Internal();
 };
 
+// Path tracing's per-frame zero fills of 8 MiB and more (about 330 MiB, 1.5 ms of GPU) dropped (config skip_rt_clears,
+// request "rtclears skip|keep"); only for the game build they were found in.
+void SetSkipRtClears(bool on);
+
 // A 300-frame input lag timeline (Timeline.hpp) every everyFrames frames (0: off).
 void LogTimeline(uint64_t everyFrames);
 

@@ -117,6 +117,8 @@ bool Load(const std::string& path) {
                 s_settings.frameGeneration = ParseBool(value);
             } else if (key == "camera_warp") {
                 s_settings.cameraWarp = ParseBool(value);
+            } else if (key == "skip_rt_clears") {
+                s_settings.skipRtClears = ParseBool(value);
             } else if (key == "low_latency") {
                 s_settings.lowLatency = ParseBool(value);
             } else if (key == "frame_limit_fps") {
