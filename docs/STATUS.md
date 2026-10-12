@@ -470,3 +470,17 @@ captures of the upscaler output 2 s apart per round, rounds interleaved A/B/A/B;
 - **Test plumbing:** the plugin read scenario requests only outside its timing windows and one per poll, and a second
   "shot" replaced the first: requests ran seconds late and in bursts. Now all waiting requests run at once, also
   during timing windows, and shots queue.
+
+## 4x in motion: pulse, minimap line, a GPU fault (2026-10-11)
+
+- **fgmotion scenario** (muted background run, steady synthetic turn, 4x): every shown image of 4 game frames saved
+  as presented (request "fgshot"). Edge energy (mean |Laplacian|, scene crop) of the generated frames against the game
+  frame they precede: detail off 0.91 vs 1.43 (64%: edges pulse soft/sharp at the rendered rate); detail on 1.40 vs
+  1.57 (89%).
+- **Thin line beside the minimap:** a copy of the minimap's right border about 10 px beside it, and a bar after the
+  clock, in all three generated frames (docs/img/minimap-line-before.png; left generated, right real). Around the HUD
+  the real frame is reprojected to the generated frame's moment; the "does that land on the HUD" test read one pixel of
+  the UI layer, so the border's soft edge came along. Now 5x5: gone (minimap-line-after.png).
+- **GPU address fault** (game exits) with the transparency step and detail both on, at the first denoised frame: run
+  bisected (reactive mask off: clean; frame generation's transparency step off: clean); the steps sampled at positions
+  made from non-finite motion vectors (sky). Both steps skip non-finite motion vectors now: clean with everything on.

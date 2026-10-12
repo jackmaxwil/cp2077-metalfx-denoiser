@@ -47,6 +47,15 @@ kernel void fg_down(texture2d<float, access::sample> src [[texture(0)]], texture
         dst.write(src.sample(bilinear, (float2(p) + 0.5) / float2(dst.get_width(), dst.get_height())), p);
 }
 static inline int2 s_max(texture2d<float, access::read> t) { return int2(t.get_width(), t.get_height()) - 1; }
+// The UI layer's alpha over 5x5 around x (output pixels): the HUD's soft edges included.
+static inline float hud_near(texture2d<float, access::read> ui, int2 x)
+{
+    float a = 0.0;
+    for (int y = -2; y <= 2; ++y)
+        for (int k = -2; k <= 2; ++k)
+            a = max(a, ui.read(uint2(clamp(x + int2(k, y), int2(0), s_max(ui)))).r);
+    return a;
+}
 // Catmull-Rom in 9 bilinear taps, for 4x's half-size generated frames: bilinear upsampling kept 60% of the real frame's
 // edge detail (Laplacian, in-game frames halved and upsampled), so edges pulsed sharp/soft at the rendered rate;
 // Catmull-Rom keeps 74% (+3.3 dB).
@@ -204,8 +213,9 @@ kernel void fg_hud(texture2d<float, access::sample> gen [[texture(0)]],
         const float2 mv = motion.read(uint2(clamp(int2(q * h.outToIn), int2(0), ms))).xy * h.mvToOut;
         const float2 r = q - mv * (1.0 - h.phase);
         const int2 ri = int2(clamp(r, float2(0.0), size - 1.0));
-        // Unless that lands on the HUD itself (the real frame has the HUD there): then the generated pixel.
-        if (ui.read(uint2(clamp(ri, int2(0), s))).r == 0.0) {
+        // Unless that lands on the HUD or its edge (the real frame has the HUD there; testing one pixel let a copy of
+        // the minimap's border through, about 10 px beside it in a turn).
+        if (hud_near(ui, ri) == 0.0) {
             dst.write(cur.sample(bilinear, r / size), p);
             return;
         }
